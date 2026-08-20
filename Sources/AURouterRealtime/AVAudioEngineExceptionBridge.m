@@ -44,3 +44,14 @@ OSStatus ARAVAudioEngineConnectSafelyToPoints(
         return kAudioUnitErr_FormatNotSupported;
     }
 }
+
+void ARAVAudioNodeRemoveTapSafely(AVAudioNode *node, AVAudioNodeBus bus) {
+    @try {
+        if (node.engine == nil) {
+            return;
+        }
+        [node removeTapOnBus:bus];
+    } @catch (NSException *exception) {
+    }
+}
+

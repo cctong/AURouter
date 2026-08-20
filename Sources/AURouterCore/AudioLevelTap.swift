@@ -1,4 +1,5 @@
 @preconcurrency import AVFAudio
+import AURouterRealtime
 import Foundation
 
 /// Installs callbacks outside AudioRoutingEngine's MainActor isolation.
@@ -24,4 +25,9 @@ enum AudioLevelTap {
             storage.store(min(peak, 1))
         }
     }
+
+    nonisolated static func remove(from node: AVAudioNode) {
+        ARAVAudioNodeRemoveTapSafely(node, 0)
+    }
+
 }

@@ -49,4 +49,10 @@ struct AudioLevelTapTests {
         }
         #expect(meter.load() > 0)
     }
+
+    @Test @MainActor
+    func removingTapFromDetachedNodeDoesNotAbort() {
+        AudioLevelTap.remove(from: AVAudioMixerNode())
+    }
+
 }

@@ -110,6 +110,9 @@ public final class AudioRoutingEngine {
                 sourceChannelCount: route.inputSelection.channelCount,
                 sampleRate: sampleRate
             )
+            newEngine.attach(inputSelector)
+            newEngine.attach(outputSelector)
+            newEngine.attach(newGainNode)
             for item in chain {
                 newEngine.attach(item.unit)
             }
@@ -195,8 +198,8 @@ public final class AudioRoutingEngine {
             isRunning = true
         } catch {
             extras.forEach { $0.stop() }
-            inputSelector.removeTap(onBus: 0)
-            newGainNode.removeTap(onBus: 0)
+            AudioLevelTap.remove(from: inputSelector)
+            AudioLevelTap.remove(from: newGainNode)
             newEngine.stop()
             throw error
         }
@@ -336,8 +339,8 @@ public final class AudioRoutingEngine {
         } catch {
             extras.forEach { $0.stop() }
             bridge.stop()
-            inputSelector.removeTap(onBus: 0)
-            newGainNode.removeTap(onBus: 0)
+            AudioLevelTap.remove(from: inputSelector)
+            AudioLevelTap.remove(from: newGainNode)
             newEngine.stop()
             throw error
         }
@@ -346,8 +349,8 @@ public final class AudioRoutingEngine {
     deinit {
         extraOutputs.forEach { $0.stop() }
         crossDeviceBridge?.stop()
-        inputMatrix?.removeTap(onBus: 0)
-        gainNode?.removeTap(onBus: 0)
+        if let inputMatrix { AudioLevelTap.remove(from: inputMatrix) }
+        if let gainNode { AudioLevelTap.remove(from: gainNode) }
         engine?.stop()
     }
 
@@ -356,8 +359,8 @@ public final class AudioRoutingEngine {
         extraOutputs.forEach { $0.stop() }
         extraOutputs = []
         crossDeviceBridge?.stop()
-        inputMatrix?.removeTap(onBus: 0)
-        gainNode?.removeTap(onBus: 0)
+        if let inputMatrix { AudioLevelTap.remove(from: inputMatrix) }
+        if let gainNode { AudioLevelTap.remove(from: gainNode) }
         engine.stop()
         self.engine = nil
         inputMatrix = nil

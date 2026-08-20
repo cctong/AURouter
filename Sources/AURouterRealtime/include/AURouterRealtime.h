@@ -83,6 +83,8 @@ OSStatus ARAVAudioEngineConnectSafelyToPoints(
     NSArray<AVAudioConnectionPoint *> *destinations,
     AVAudioFormat *format
 );
+void ARAVAudioNodeRemoveTapSafely(AVAudioNode *node, AVAudioNodeBus bus);
+
 #endif
 
 #ifdef __cplusplus
