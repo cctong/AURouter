@@ -435,28 +435,29 @@ final class RouterViewModel: ObservableObject {
         guard chain.contains(where: { $0.id == slotID }) else { return }
         do {
             let unit = try await hostedUnit(for: slotID)
-            let unitName = unit.name
-            let viewController = await unit.auAudioUnit.requestViewController()
+            let unitName = unit.auAudioUnit.audioUnitName ?? unit.name
+            PlugInWindowController.selectViewConfiguration(for: unit.auAudioUnit)
+            let customView = await unit.auAudioUnit.requestViewController()
             guard chain.contains(where: { $0.id == slotID }) else { return }
-            guard let viewController else {
-                errorMessage = "This Audio Unit does not provide a custom interface."
-                return
-            }
             closePlugInUI()
-            let window = NSWindow(contentViewController: viewController)
-            window.title = unitName
-            window.styleMask.insert(.resizable)
-            window.setContentSize(
-                NSSize(
-                    width: max(viewController.view.fittingSize.width, 480),
-                    height: max(viewController.view.fittingSize.height, 320)
+            let controller: PlugInWindowController
+            if let customView {
+                controller = PlugInWindowController(
+                    viewController: customView,
+                    title: unitName,
+                    generic: false
                 )
-            )
-            let controller = NSWindowController(window: window)
+            } else {
+                controller = PlugInWindowController(
+                    viewController: GenericAudioUnitHost.viewController(for: unit),
+                    title: unitName,
+                    generic: true
+                )
+            }
             plugInWindowController = controller
             plugInSlotID = slotID
             controller.showWindow(nil)
-            window.makeKeyAndOrderFront(nil)
+            controller.window?.makeKeyAndOrderFront(nil)
         } catch {
             errorMessage = error.localizedDescription
         }
