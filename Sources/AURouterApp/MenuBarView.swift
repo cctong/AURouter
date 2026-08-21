@@ -18,8 +18,8 @@ struct MenuBarView: View {
             }
 
             VStack(alignment: .leading, spacing: 6) {
-                labeledMeter("IN", level: viewModel.inputLevel)
-                labeledMeter("OUT", level: viewModel.outputLevel)
+                labeledMeter("IN", channel: .input)
+                labeledMeter("OUT", channel: .output)
             }
 
             GainControl(gain: $viewModel.gain, isMuted: viewModel.isPanicMuted)
@@ -84,6 +84,14 @@ struct MenuBarView: View {
         .frame(width: 280)
         .background(AURouterLook.rack)
         .preferredColorScheme(.dark)
+        .onAppear { viewModel.setMeterSurface(.menuBar, visible: true) }
+        .onDisappear { viewModel.setMeterSurface(.menuBar, visible: false) }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
+            viewModel.nudgeGain(percentSteps: press.key == .leftArrow ? -1 : 1)
+            return .handled
+        }
     }
 
     private var statusColor: Color {
@@ -94,13 +102,13 @@ struct MenuBarView: View {
         )
     }
 
-    private func labeledMeter(_ title: String, level: Float) -> some View {
+    private func labeledMeter(_ title: String, channel: RouteLevelMeter.Channel) -> some View {
         HStack(spacing: 8) {
             Text(title)
                 .font(AURouterLook.legendFont)
                 .foregroundStyle(AURouterLook.legend)
                 .frame(width: 28, alignment: .leading)
-            LevelMeter(level: level, isLive: viewModel.isRunning)
+            RouteLevelMeter(meters: viewModel.meters, channel: channel, isLive: viewModel.isRunning)
         }
     }
 }

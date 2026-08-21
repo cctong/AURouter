@@ -26,6 +26,7 @@ let package = Package(
             name: "AURouterCore",
             dependencies: ["AURouterRealtime"],
             linkerSettings: [
+                .linkedFramework("Accelerate"),
                 .linkedFramework("AudioToolbox"),
                 .linkedFramework("AVFAudio"),
                 .linkedFramework("CoreAudio")

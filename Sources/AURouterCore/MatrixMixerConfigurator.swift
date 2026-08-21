@@ -3,6 +3,25 @@ import AudioToolbox
 import Foundation
 
 enum MatrixMixerConfigurator {
+    static func setStreamFormats(
+        _ matrix: AVAudioUnit,
+        input: AVAudioFormat,
+        output: AVAudioFormat
+    ) throws {
+        let audioUnit = matrix.auAudioUnit
+        guard audioUnit.inputBusses.count > 0, audioUnit.outputBusses.count > 0 else {
+            throw AURouterError.audioUnit("The matrix mixer does not expose audio busses.")
+        }
+        do {
+            try audioUnit.inputBusses[0].setFormat(input)
+            try audioUnit.outputBusses[0].setFormat(output)
+        } catch {
+            throw AURouterError.audioUnit(
+                "The matrix mixer rejected \(Int(input.channelCount))→\(Int(output.channelCount)) channels at \(Int(input.sampleRate)) Hz."
+            )
+        }
+    }
+
     static func configure(
         _ matrix: AVAudioUnit,
         routes: [(Int, Int, Float)]

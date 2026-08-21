@@ -138,6 +138,24 @@ struct GainControl: View {
         .accessibilityElement(children: .combine)
         .accessibilityLabel("Output gain")
         .accessibilityValue(isMuted ? "Muted" : "\(Int(gain * 100)) percent")
+        .accessibilityAdjustableAction { direction in
+            switch direction {
+            case .increment: nudge(1)
+            case .decrement: nudge(-1)
+            default: break
+            }
+        }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
+            nudge(press.key == .leftArrow ? -1 : 1)
+            return .handled
+        }
+    }
+
+    private func nudge(_ percentSteps: Int) {
+        let percent = (gain * 100).rounded() + Double(percentSteps)
+        gain = min(2, max(0, percent / 100))
     }
 }
 
@@ -152,7 +170,7 @@ struct LevelMeter: View {
     var body: some View {
         Group {
             if isLive {
-                TimelineView(.periodic(from: .now, by: 0.05)) { context in
+                TimelineView(.periodic(from: .now, by: 0.1)) { context in
                     ladder(held: heldPeak(now: context.date))
                 }
             } else {

@@ -3,10 +3,12 @@ import Foundation
 public struct PersistedSlot: Hashable, Codable, Sendable {
     public var effectID: String
     public var bypassed: Bool
+    public var state: Data?
 
-    public init(effectID: String, bypassed: Bool = false) {
+    public init(effectID: String, bypassed: Bool = false, state: Data? = nil) {
         self.effectID = effectID
         self.bypassed = bypassed
+        self.state = state
     }
 }
 

@@ -8,6 +8,8 @@ struct ContentView: View {
     @State private var isAddingEffect = false
     @State private var effectQuery = ""
     @State private var profileToDelete: RoutingProfile?
+    @State private var dropTargetID: UUID?
+
 
     var body: some View {
         VStack(spacing: 0) {
@@ -23,18 +25,7 @@ struct ContentView: View {
                         addEffectButton(emptySlot: true)
                     } else {
                         ForEach(Array(viewModel.chain.enumerated()), id: \.element.id) { index, slot in
-                            ChainGraphNode(
-                                title: viewModel.effectTitle(for: slot),
-                                isRunning: viewModel.isRunning,
-                                isFirst: index == 0,
-                                isLast: index == viewModel.chain.count - 1,
-                                bypass: bypassBinding(for: slot),
-                                canOpenUI: viewModel.canOpenPlugInUI(for: slot.id),
-                                onOpenUI: { viewModel.openPlugInUI(for: slot.id) },
-                                onMoveUp: { viewModel.moveSlot(slot.id, by: -1) },
-                                onMoveDown: { viewModel.moveSlot(slot.id, by: 1) },
-                                onRemove: { viewModel.removeSlot(slot.id) }
-                            )
+                            chainSlotView(slot: slot, index: index)
                             if index < viewModel.chain.count - 1 {
                                 PatchCord(
                                     isLive: viewModel.isRunning && !slot.bypassed,
@@ -100,6 +91,14 @@ struct ContentView: View {
             }
         } message: {
             Text("This cannot be undone.")
+        }
+        .onAppear { viewModel.setMeterSurface(.mainWindow, visible: true) }
+        .onDisappear { viewModel.setMeterSurface(.mainWindow, visible: false) }
+        .focusable()
+        .focusEffectDisabled()
+        .onKeyPress(keys: [.leftArrow, .rightArrow]) { press in
+            viewModel.nudgeGain(percentSteps: press.key == .leftArrow ? -1 : 1)
+            return .handled
         }
     }
 
@@ -261,7 +260,7 @@ struct ContentView: View {
             }
             .labelsHidden()
             .lockedWhileRunning(viewModel.isRunning)
-            LevelMeter(level: viewModel.inputLevel, isLive: viewModel.isRunning)
+            RouteLevelMeter(meters: viewModel.meters, channel: .input, isLive: viewModel.isRunning)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -357,7 +356,7 @@ struct ContentView: View {
             }
             .disabled(!viewModel.canAddOutputDevice)
             .help(viewModel.isRunning ? "Stop routing to change devices." : "Route to another output device")
-            LevelMeter(level: viewModel.outputLevel, isLive: viewModel.isRunning)
+            RouteLevelMeter(meters: viewModel.meters, channel: .output, isLive: viewModel.isRunning)
         }
         .padding(12)
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -597,23 +596,45 @@ struct ContentView: View {
             set: { viewModel.setBypassed(slot.id, $0) }
         )
     }
+
+    @ViewBuilder
+    private func chainSlotView(slot: EffectChainSlot, index: Int) -> some View {
+        ChainGraphNode(
+            title: viewModel.effectTitle(for: slot),
+            isRunning: viewModel.isRunning,
+            isDropTarget: dropTargetID == slot.id,
+            bypass: bypassBinding(for: slot),
+            canOpenUI: viewModel.canOpenPlugInUI(for: slot.id),
+            onOpenUI: { viewModel.openPlugInUI(for: slot.id) },
+            onRemove: { viewModel.removeSlot(slot.id) }
+        )
+        .reorderDrag(
+            slotID: slot.id,
+            title: viewModel.effectTitle(for: slot),
+            isEnabled: !viewModel.isRunning,
+            targetIndex: index,
+            onMove: { viewModel.moveSlot($0, to: $1) },
+            isTargeted: { dropTargetID = $0 }
+        )
+    }
 }
 
 private struct ChainGraphNode: View {
     let title: String
     let isRunning: Bool
-    let isFirst: Bool
-    let isLast: Bool
+    let isDropTarget: Bool
     @Binding var bypass: Bool
     let canOpenUI: Bool
     let onOpenUI: () -> Void
-    let onMoveUp: () -> Void
-    let onMoveDown: () -> Void
     let onRemove: () -> Void
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             HStack(spacing: 8) {
+                Image(systemName: "line.3.horizontal")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(AURouterLook.legend)
+                    .help(isRunning ? "Stop to reorder the chain." : "Drag to reorder")
                 Text(title)
                     .font(.system(size: 13, weight: .semibold).width(.condensed))
                     .foregroundStyle(bypass ? AURouterLook.legend : Color.white)
@@ -628,16 +649,6 @@ private struct ChainGraphNode: View {
             HStack(spacing: 8) {
                 Toggle("Bypass", isOn: $bypass)
                 Spacer()
-                Button(action: onMoveUp) {
-                    Image(systemName: "chevron.up")
-                }
-                .disabled(isRunning || isFirst)
-                .help(isRunning ? "Stop to reorder the chain." : "Move up")
-                Button(action: onMoveDown) {
-                    Image(systemName: "chevron.down")
-                }
-                .disabled(isRunning || isLast)
-                .help(isRunning ? "Stop to reorder the chain." : "Move down")
                 Button(role: .destructive, action: onRemove) {
                     Image(systemName: "xmark")
                 }
@@ -650,6 +661,13 @@ private struct ChainGraphNode: View {
         .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
         .patchChrome(isLive: isRunning && !bypass)
+        .overlay(
+            RoundedRectangle(cornerRadius: 6)
+                .strokeBorder(
+                    isDropTarget ? AURouterLook.tip : Color.clear,
+                    lineWidth: 1.5
+                )
+        )
     }
 }
 
@@ -686,5 +704,61 @@ private struct EffectSearchPopover: View {
         }
         .padding(12)
         .onAppear { queryFocused = true }
+    }
+}
+
+private extension View {
+    func reorderDrag(
+        slotID: UUID,
+        title: String,
+        isEnabled: Bool,
+        targetIndex: Int,
+        onMove: @escaping (UUID, Int) -> Void,
+        isTargeted: @escaping (UUID?) -> Void
+    ) -> some View {
+        modifier(
+            ReorderDragModifier(
+                slotID: slotID,
+                title: title,
+                isEnabled: isEnabled,
+                targetIndex: targetIndex,
+                onMove: onMove,
+                isTargeted: isTargeted
+            )
+        )
+    }
+}
+
+private struct ReorderDragModifier: ViewModifier {
+    let slotID: UUID
+    let title: String
+    let isEnabled: Bool
+    let targetIndex: Int
+    let onMove: (UUID, Int) -> Void
+    let isTargeted: (UUID?) -> Void
+
+    @ViewBuilder
+    func body(content: Content) -> some View {
+        if isEnabled {
+            content
+                .draggable(slotID.uuidString) {
+                    Text(title)
+                        .font(.callout.weight(.semibold))
+                        .padding(10)
+                        .background(AURouterLook.face, in: RoundedRectangle(cornerRadius: 6))
+                }
+                .dropDestination(for: String.self) { items, _ in
+                    guard let raw = items.first, let id = UUID(uuidString: raw) else {
+                        return false
+                    }
+                    onMove(id, targetIndex)
+                    isTargeted(nil)
+                    return true
+                } isTargeted: { targeted in
+                    isTargeted(targeted ? slotID : nil)
+                }
+        } else {
+            content
+        }
     }
 }

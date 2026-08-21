@@ -12,11 +12,13 @@ struct EffectChainSlot: Identifiable, Hashable {
     let id: UUID
     var effectID: String
     var bypassed: Bool
+    var state: Data?
 
-    init(effectID: String, bypassed: Bool = false) {
+    init(effectID: String, bypassed: Bool = false, state: Data? = nil) {
         self.id = UUID()
         self.effectID = effectID
         self.bypassed = bypassed
+        self.state = state
     }
 }
 
@@ -56,16 +58,16 @@ final class RouterViewModel: ObservableObject {
         didSet { selectDefaultOutputPair() }
     }
     @Published var selectedInputSelectionID = "" {
-        didSet { persistSession() }
+        didSet { scheduleSessionSave() }
     }
     @Published var outputDestinations: [OutputDestination] = [] {
-        didSet { persistSession() }
+        didSet { scheduleSessionSave() }
     }
     @Published var extraOutputSlots: [OutputDeviceSlot] = [] {
-        didSet { persistSession() }
+        didSet { scheduleSessionSave() }
     }
     @Published var chain: [EffectChainSlot] = [] {
-        didSet { persistSession() }
+        didSet { scheduleSessionSave() }
     }
     @Published var gain: Double = 0 {
         didSet {
@@ -73,29 +75,34 @@ final class RouterViewModel: ObservableObject {
                 isPanicMuted = false
             }
             router.setGain(Float(gain))
-            persistSession()
+            scheduleSessionSave()
         }
     }
     @Published private(set) var isRunning = false
     @Published private(set) var isBusy = false
     @Published private(set) var isPanicMuted = false
-    @Published private(set) var inputLevel: Float = 0
-    @Published private(set) var outputLevel: Float = 0
     @Published private(set) var statusMessage = "Choose input and output, then Start."
     @Published private(set) var errorTitle = "Couldn’t start route"
     @Published private(set) var errorMessage: String?
     @Published private(set) var profiles: [RoutingProfile] = RoutingProfileStore.load()
     @Published private(set) var launchesAtLogin = SMAppService.mainApp.status == .enabled
+    let meters = RouteMeterState()
 
 
     private let router = AudioRoutingEngine()
     private var meterTask: Task<Void, Never>?
-    private var plugInWindowController: NSWindowController?
+    private var sessionSaveTask: Task<Void, Never>?
+    private var visibleMeterSurfaces: Set<MeterSurface> = []
+    private var plugInWindows: [UUID: PlugInWindowController] = [:]
     private var plugInSlotID: UUID?
     private var hostedUnits: [UUID: AVAudioUnit] = [:]
     private var hostingTasks: [UUID: Task<AVAudioUnit, Error>] = [:]
+    private var lifecycleObservers: [NSObjectProtocol] = []
+
+
     private var sessionToRestore = LastSessionStore.load()
     private var suppressPersistence = false
+    private var lastSavedBytes: Data? = UserDefaults.standard.data(forKey: LastSessionStore.key)
     private var hardwareObserver: AudioHardwareObserver?
     private var knownDeviceUIDs: Set<String> = []
     private var runningInputRate: Double?
@@ -258,15 +265,31 @@ final class RouterViewModel: ObservableObject {
                 self?.handleHardwareChange()
             }
         }
+        let center = NotificationCenter.default
+        lifecycleObservers = [
+            center.addObserver(forName: NSApplication.didResignActiveNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    guard let self else { return }
+                    self.flushSession(captureAudioUnitState: !self.isRunning)
+                }
+            },
+            center.addObserver(forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { [weak self] _ in
+                Task { @MainActor in
+                    self?.prepareToTerminate()
+                }
+            }
+        ]
         Task { await scanEffectsOutOfProcess() }
     }
 
     deinit {
         meterTask?.cancel()
+        sessionSaveTask?.cancel()
         hardwareObserver?.invalidate()
         MainActor.assumeIsolated {
-            plugInWindowController?.close()
-            plugInWindowController = nil
+            lifecycleObservers.forEach { NotificationCenter.default.removeObserver($0) }
+            plugInWindows.values.forEach { $0.close() }
+            plugInWindows = [:]
         }
     }
 
@@ -408,9 +431,9 @@ final class RouterViewModel: ObservableObject {
         runningOutputRates = [:]
         router.stop()
         isRunning = false
-        inputLevel = 0
-        outputLevel = 0
+        meters.reset()
         statusMessage = status
+        flushSession(captureAudioUnitState: true)
     }
 
     func openPlugInUI(for slotID: UUID) {
@@ -483,7 +506,7 @@ final class RouterViewModel: ObservableObject {
     func removeSlot(_ id: UUID) {
         guard !isRunning else { return }
         if plugInSlotID == id {
-            closePlugInUI()
+            discardPlugInUI(for: id)
         }
         hostingTasks[id]?.cancel()
         hostingTasks[id] = nil
@@ -498,6 +521,17 @@ final class RouterViewModel: ObservableObject {
         chain.swapAt(index, destination)
     }
 
+    func moveSlot(_ id: UUID, to destinationIndex: Int) {
+        guard !isRunning, let from = chain.firstIndex(where: { $0.id == id }) else { return }
+        let to = min(max(destinationIndex, 0), chain.count - 1)
+        guard from != to else { return }
+        var next = chain
+        let item = next.remove(at: from)
+        next.insert(item, at: to)
+        chain = next
+    }
+
+
     func setBypassed(_ id: UUID, _ bypassed: Bool) {
         guard let index = chain.firstIndex(where: { $0.id == id }) else { return }
         chain[index].bypassed = bypassed
@@ -507,37 +541,52 @@ final class RouterViewModel: ObservableObject {
             hostedUnits[id]?.auAudioUnit.shouldBypassEffect = bypassed
         }
     }
-
     private func closePlugInUI() {
-        plugInWindowController?.close()
-        plugInWindowController = nil
+        flushSession(captureAudioUnitState: !isRunning)
+        if let plugInSlotID {
+            plugInWindows[plugInSlotID]?.window?.orderOut(nil)
+        }
         plugInSlotID = nil
+    }
+
+    private func discardPlugInUI(for slotID: UUID) {
+        flushSession(captureAudioUnitState: !isRunning)
+        if let controller = plugInWindows.removeValue(forKey: slotID) {
+            controller.window?.isReleasedWhenClosed = true
+            controller.close()
+        }
+        if plugInSlotID == slotID {
+            plugInSlotID = nil
+        }
     }
 
     private func presentPlugInUI(for slotID: UUID) async {
         guard chain.contains(where: { $0.id == slotID }) else { return }
+        if let existing = plugInWindows[slotID] {
+            plugInSlotID = slotID
+            existing.showWindow(nil)
+            existing.window?.makeKeyAndOrderFront(nil)
+            return
+        }
         do {
             let unit = try await hostedUnit(for: slotID)
             let unitName = unit.auAudioUnit.audioUnitName ?? unit.name
             PlugInWindowController.selectViewConfiguration(for: unit.auAudioUnit)
             let customView = await unit.auAudioUnit.requestViewController()
             guard chain.contains(where: { $0.id == slotID }) else { return }
-            closePlugInUI()
-            let controller: PlugInWindowController
-            if let customView {
-                controller = PlugInWindowController(
-                    viewController: customView,
-                    title: unitName,
-                    generic: false
-                )
-            } else {
-                controller = PlugInWindowController(
-                    viewController: GenericAudioUnitHost.viewController(for: unit),
-                    title: unitName,
-                    generic: true
-                )
-            }
-            plugInWindowController = controller
+            let content = customView ?? GenericAudioUnitHost.viewController(for: unit)
+            let controller = PlugInWindowController(
+                viewController: content,
+                title: unitName,
+                generic: customView == nil,
+                onClose: { [weak self] in
+                    self?.flushSession(captureAudioUnitState: self?.isRunning != true)
+                    if self?.plugInSlotID == slotID {
+                        self?.plugInSlotID = nil
+                    }
+                }
+            )
+            plugInWindows[slotID] = controller
             plugInSlotID = slotID
             controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
@@ -566,12 +615,16 @@ final class RouterViewModel: ObservableObject {
             hostedUnits[slotID] = unit
             hostingTasks[slotID] = nil
             unit.auAudioUnit.shouldBypassEffect = slot.bypassed
+            if let state = slot.state {
+                AudioUnitStateStore.apply(state, to: unit)
+            }
             return unit
         } catch {
             hostingTasks[slotID] = nil
             throw error
         }
     }
+
 
     private func hostChain() {
         let slots = chain
@@ -580,6 +633,11 @@ final class RouterViewModel: ObservableObject {
                 _ = try? await hostedUnit(for: slot.id)
             }
         }
+    }
+
+    func nudgeGain(percentSteps: Int) {
+        let percent = (gain * 100).rounded() + Double(percentSteps)
+        gain = min(2, max(0, percent / 100))
     }
 
     func panicMute() {
@@ -670,7 +728,7 @@ final class RouterViewModel: ObservableObject {
                 of: [inputDevice.id, primaryDevice.id] + extraDevices.map(\.id)
             )
             statusMessage = "Live: \(inputDevice.name) → \(outputRoutes.count) outputs"
-            startMeterPolling()
+            refreshMeterPolling()
         } catch {
             router.stop()
             isRunning = false
@@ -695,20 +753,20 @@ final class RouterViewModel: ObservableObject {
     private func selectDefaultInputSelection() {
         guard let device = selectedInputDevice else {
             selectedInputSelectionID = ""
-            persistSession()
+            scheduleSessionSave()
             return
         }
         if !device.inputSelections.contains(where: { $0.id == selectedInputSelectionID }) {
             selectedInputSelectionID = device.inputSelections.first?.id ?? ""
         }
-        persistSession()
+        scheduleSessionSave()
     }
 
     private func selectDefaultOutputPair() {
         guard let device = selectedOutputDevice else {
             outputDestinations = []
             extraOutputSlots = []
-            persistSession()
+            scheduleSessionSave()
             return
         }
         let available = Set(device.outputStereoPairs.map(\.id))
@@ -726,19 +784,30 @@ final class RouterViewModel: ObservableObject {
             if filtered.pairSlots.isEmpty, let first = pairs.first {
                 filtered.pairSlots = [OutputDestination(pairID: first.id)]
             }
-            return filtered.pairSlots.isEmpty ? nil : filtered
+            return filtered
         }
-        persistSession()
+        scheduleSessionSave()
     }
 
-    private func startMeterPolling() {
+    func setMeterSurface(_ surface: MeterSurface, visible: Bool) {
+        if visible {
+            visibleMeterSurfaces.insert(surface)
+        } else {
+            visibleMeterSurfaces.remove(surface)
+        }
+        refreshMeterPolling()
+    }
+
+    private func refreshMeterPolling() {
         meterTask?.cancel()
+        meterTask = nil
+        guard isRunning, !visibleMeterSurfaces.isEmpty else { return }
+        meters.publish(input: router.inputLevel, output: router.outputLevel)
         meterTask = Task { [weak self] in
             while !Task.isCancelled {
-                guard let self else { return }
-                self.inputLevel = self.router.inputLevel
-                self.outputLevel = self.router.outputLevel
-                try? await Task.sleep(for: .milliseconds(50))
+                try? await Task.sleep(for: .milliseconds(100))
+                guard let self, !Task.isCancelled else { return }
+                self.meters.publish(input: self.router.inputLevel, output: self.router.outputLevel)
             }
         }
     }
@@ -760,7 +829,7 @@ final class RouterViewModel: ObservableObject {
                 effects: effects
             )
             chain = restored.chain.map {
-                EffectChainSlot(effectID: $0.effectID, bypassed: $0.bypassed)
+                EffectChainSlot(effectID: $0.effectID, bypassed: $0.bypassed, state: $0.state)
             }
             suppressPersistence = false
             sessionToRestore = nil
@@ -784,7 +853,7 @@ final class RouterViewModel: ObservableObject {
             OutputDeviceSlot(deviceUID: $0.deviceUID, pairIDs: $0.pairIDs)
         }
         chain = restored.chain.map {
-            EffectChainSlot(effectID: $0.effectID, bypassed: $0.bypassed)
+            EffectChainSlot(effectID: $0.effectID, bypassed: $0.bypassed, state: $0.state)
         }
         gain = restored.gain
         hostChain()
@@ -810,7 +879,11 @@ final class RouterViewModel: ObservableObject {
 
     func saveProfile(named name: String) {
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        guard !trimmed.isEmpty, let session = makeSession() else { return }
+        guard !trimmed.isEmpty else { return }
+        if !isRunning {
+            captureHostedAudioUnitStates()
+        }
+        guard let session = makeSession() else { return }
         if let index = profiles.firstIndex(where: {
             $0.name.caseInsensitiveCompare(trimmed) == .orderedSame
         }) {
@@ -831,7 +904,7 @@ final class RouterViewModel: ObservableObject {
         suppressPersistence = true
         applyRestoredSession(profile.session)
         suppressPersistence = false
-        persistSession()
+        flushSession(captureAudioUnitState: false)
         statusMessage = "Loaded profile “\(profile.name)”."
     }
 
@@ -850,13 +923,64 @@ final class RouterViewModel: ObservableObject {
                 inputSelection: inputSelection,
                 outputs: currentOutputRoutes()
             ),
-            chain: chain.map { PersistedSlot(effectID: $0.effectID, bypassed: $0.bypassed) },
+            chain: chain.map { slot in
+                PersistedSlot(
+                    effectID: slot.effectID,
+                    bypassed: slot.bypassed,
+                    state: slot.state
+                )
+            },
             gain: gain
         )
     }
 
-    private func persistSession() {
+    private func captureHostedAudioUnitStates() {
+        let previous = suppressPersistence
+        suppressPersistence = true
+        defer { suppressPersistence = previous }
+        for index in chain.indices {
+            if let unit = hostedUnits[chain[index].id],
+               let snapshot = AudioUnitStateStore.snapshot(unit) {
+                chain[index].state = snapshot
+            }
+        }
+    }
+
+    private func scheduleSessionSave() {
+        guard !suppressPersistence else { return }
+        sessionSaveTask?.cancel()
+        sessionSaveTask = Task { [weak self] in
+            try? await Task.sleep(for: .milliseconds(500))
+            guard !Task.isCancelled else { return }
+            self?.flushSession(captureAudioUnitState: false)
+        }
+    }
+
+    private func flushSession(captureAudioUnitState: Bool) {
+        sessionSaveTask?.cancel()
+        sessionSaveTask = nil
+        if captureAudioUnitState {
+            captureHostedAudioUnitStates()
+        }
         guard !suppressPersistence, let session = makeSession() else { return }
-        LastSessionStore.save(session)
+        guard let data = try? JSONEncoder().encode(session), data != lastSavedBytes else { return }
+        UserDefaults.standard.set(data, forKey: LastSessionStore.key)
+        lastSavedBytes = data
+    }
+
+    private func prepareToTerminate() {
+        if isRunning {
+            meterTask?.cancel()
+            meterTask = nil
+            hardwareObserver?.clearSampleRateWatches()
+            runningInputRate = nil
+            runningOutputRate = nil
+            runningOutputUIDs = []
+            runningOutputRates = [:]
+            router.stop()
+            isRunning = false
+            meters.reset()
+        }
+        flushSession(captureAudioUnitState: true)
     }
 }

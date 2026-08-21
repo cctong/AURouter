@@ -25,6 +25,9 @@ public enum AURouterError: LocalizedError, Sendable {
     }
 
     public static func describe(_ status: OSStatus) -> String {
+        if status == kAudioUnitErr_FormatNotSupported {
+            return "format not supported (\(status))"
+        }
         let value = UInt32(bitPattern: status)
         let bytes: [UInt8] = [
             UInt8((value >> 24) & 0xff),

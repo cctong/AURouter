@@ -16,3 +16,12 @@ import Testing
     #expect(ChannelPair.available(channelCount: 3) == [ChannelPair(left: 0, right: 1)])
     #expect(ChannelPair.available(channelCount: 1).isEmpty)
 }
+
+@Test func outputPairSevenEightMapsToZeroBasedHardwareChannels() {
+    let pair = ChannelPair(left: 6, right: 7)
+    #expect(pair.displayName == "Channels 7–8")
+    let routes = OutputDeviceRoute(deviceUID: "audient", pairs: [pair]).matrixRoutes()
+    #expect(routes.contains { $0.0 == 0 && $0.1 == 6 && $0.2 == 1 })
+    #expect(routes.contains { $0.0 == 1 && $0.1 == 7 && $0.2 == 1 })
+}
+

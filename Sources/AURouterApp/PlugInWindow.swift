@@ -4,28 +4,54 @@ import CoreAudioKit
 
 
 @MainActor
-final class PlugInWindowController: NSWindowController {
+final class PlugInWindowController: NSWindowController, NSWindowDelegate {
     private var sizeObservation: NSKeyValueObservation?
+    private var onClose: () -> Void = {}
 
-    convenience init(viewController: NSViewController, title: String, generic: Bool) {
+    convenience init(
+        viewController: NSViewController,
+        title: String,
+        generic: Bool,
+        onClose: @escaping () -> Void
+    ) {
         _ = viewController.view
         viewController.view.layoutSubtreeIfNeeded()
         let window = NSWindow(contentViewController: viewController)
         window.title = title
         window.styleMask.insert(.resizable)
         window.collectionBehavior.insert(.fullScreenNone)
+        window.isReleasedWhenClosed = false
         self.init(window: window)
+        self.onClose = onClose
+        window.delegate = self
         applySize(from: viewController, generic: generic)
         sizeObservation = viewController.observe(\.preferredContentSize, options: [.new]) { [weak self] controller, _ in
             Task { @MainActor in
-                self?.applySize(from: controller, generic: generic)
+                guard let self, let window = self.window, window.isVisible else { return }
+                self.applySize(from: controller, generic: generic)
             }
         }
     }
 
+    override func showWindow(_ sender: Any?) {
+        super.showWindow(sender)
+        (contentViewController as? PlugInVisibilityControlling)?.setPlugInVisible(true)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        (contentViewController as? PlugInVisibilityControlling)?.setPlugInVisible(false)
+        onClose()
+        sender.orderOut(nil)
+        return false
+    }
+
+
+
     private func applySize(from viewController: NSViewController, generic: Bool) {
         guard let window else { return }
         let size = Self.resolvedSize(for: viewController, generic: generic)
+        let current = window.contentRect(forFrameRect: window.frame).size
+        if current.width == size.width, current.height == size.height { return }
         window.setContentSize(size)
         if generic {
             window.contentMinSize = NSSize(width: 360, height: 200)

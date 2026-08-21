@@ -89,3 +89,67 @@ import Testing
     #expect(right.allSatisfy { !$0.isNaN && $0 != 0 })
 }
 
+@Test func adaptiveRingWriteWrapsContiguousSpans() throws {
+    let wrapping = try AdaptiveAudioRingBuffer(
+        capacityFrames: 16,
+        targetFrames: 4,
+        inputSampleRate: 48_000,
+        outputSampleRate: 48_000
+    )
+    let control = try AdaptiveAudioRingBuffer(
+        capacityFrames: 64,
+        targetFrames: 4,
+        inputSampleRate: 48_000,
+        outputSampleRate: 48_000
+    )
+    let first = (0..<8).map(Float.init)
+    let second = (8..<20).map(Float.init)
+    #expect(wrapping.write(left: first, right: first) == 8)
+    #expect(control.write(left: first, right: first) == 8)
+
+    var wrapLeft = Array(repeating: Float.nan, count: 4)
+    var wrapRight = Array(repeating: Float.nan, count: 4)
+    var controlLeft = Array(repeating: Float.nan, count: 4)
+    var controlRight = Array(repeating: Float.nan, count: 4)
+    #expect(wrapping.read(left: &wrapLeft, right: &wrapRight) == 4)
+    #expect(control.read(left: &controlLeft, right: &controlRight) == 4)
+    #expect(wrapLeft == controlLeft)
+    #expect(wrapRight == controlRight)
+
+    #expect(wrapping.write(left: second, right: second) == 12)
+    #expect(control.write(left: second, right: second) == 12)
+    wrapLeft = Array(repeating: Float.nan, count: 8)
+    wrapRight = Array(repeating: Float.nan, count: 8)
+    controlLeft = Array(repeating: Float.nan, count: 8)
+    controlRight = Array(repeating: Float.nan, count: 8)
+    #expect(wrapping.read(left: &wrapLeft, right: &wrapRight) == 8)
+    #expect(control.read(left: &controlLeft, right: &controlRight) == 8)
+    #expect(wrapLeft == controlLeft)
+    #expect(wrapRight == controlRight)
+}
+
+@Test func adaptiveRingInterpolatesRampAcrossReads() throws {
+    let ring = try AdaptiveAudioRingBuffer(
+        capacityFrames: 128,
+        targetFrames: 16,
+        inputSampleRate: 48_000,
+        outputSampleRate: 48_000
+    )
+    let ramp = (0..<64).map(Float.init)
+    #expect(ring.write(left: ramp, right: ramp) == 64)
+
+    var first = Array(repeating: Float.zero, count: 8)
+    var firstRight = Array(repeating: Float.zero, count: 8)
+    #expect(ring.read(left: &first, right: &firstRight) == 8)
+    #expect(first == firstRight)
+    #expect(abs(first[0] - 0) < 0.0001)
+    #expect(abs(first[1] - 1.003) < 0.0001)
+
+    var second = Array(repeating: Float.zero, count: 8)
+    var secondRight = Array(repeating: Float.zero, count: 8)
+    #expect(ring.read(left: &second, right: &secondRight) == 8)
+    #expect(second == secondRight)
+    #expect(abs(second[0] - 8.024) < 0.0001)
+    #expect(second[0] > first[7])
+}
+

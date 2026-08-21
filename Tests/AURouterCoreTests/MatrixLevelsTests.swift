@@ -15,6 +15,19 @@ import Testing
     #expect(levels[4 * 3 + 2] == 1)
 }
 
+@Test func matrixLevelsRouteStereoToHardwareChannelsSevenAndEight() throws {
+    let levels = try MatrixLevels.make(
+        inputChannels: 2,
+        outputChannels: 8,
+        routes: [(input: 0, output: 6, gain: 1), (input: 1, output: 7, gain: 1)]
+    )
+    let columns = 9
+    #expect(levels[0 * columns + 6] == 1)
+    #expect(levels[1 * columns + 7] == 1)
+    #expect(levels[0 * columns + 0] == 0)
+}
+
+
 @Test func matrixLevelsRejectOutOfRangeRoutes() {
     #expect(throws: AURouterError.self) {
         try MatrixLevels.make(

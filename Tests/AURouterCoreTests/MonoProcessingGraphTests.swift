@@ -104,6 +104,38 @@ struct MonoProcessingGraphTests {
     }
 
     @Test @MainActor
+    func crossDeviceStyleStereoSourceReachesGainWithoutInputMatrix() async throws {
+        let engine = AVAudioEngine()
+        let rate = engine.outputNode.inputFormat(forBus: 0).sampleRate
+        let stereo = try #require(AudioUnitFormatNegotiator.processingFormat(sampleRate: rate, channelCount: 2))
+        let source = ProcessingGraphTestSource.make(format: stereo)
+        let gain = AVAudioMixerNode()
+        gain.outputVolume = 1
+
+        engine.attach(source)
+        engine.attach(gain)
+        try AudioGraphConnector.connect(
+            engine,
+            from: source,
+            to: gain,
+            format: stereo,
+            operation: "Test stereo source to gain"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: gain,
+            to: engine.mainMixerNode,
+            format: stereo,
+            operation: "Test stereo gain to mixer"
+        )
+        engine.mainMixerNode.outputVolume = 0
+        engine.prepare()
+        try engine.start()
+        try await Task.sleep(for: .milliseconds(50))
+        engine.stop()
+    }
+
+    @Test @MainActor
     func installedMonoWavesEffectRendersInsideAdaptedStereoGraph() async throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
@@ -414,6 +446,68 @@ struct MonoProcessingGraphTests {
 
         try engine.start()
         try await Task.sleep(for: .milliseconds(100))
+        engine.stop()
+    }
+
+    @Test @MainActor
+    func matrixWithHardwareLayoutFeedsPreparedAppleDelay() async throws {
+        let engine = AVAudioEngine()
+        let rate = engine.outputNode.inputFormat(forBus: 0).sampleRate
+        let hardware = try #require(AVAudioFormat(standardFormatWithSampleRate: rate, channels: 2))
+        let processing = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: rate, channelCount: 2)
+        )
+        let source = ProcessingGraphTestSource.make(format: hardware)
+        let matrix = try await instantiateMatrixMixer()
+        let delay = try await instantiate(
+            AudioComponentDescription(
+                componentType: kAudioUnitType_Effect,
+                componentSubType: kAudioUnitSubType_Delay,
+                componentManufacturer: kAudioUnitManufacturer_Apple,
+                componentFlags: 0,
+                componentFlagsMask: 0
+            )
+        )
+        try AudioUnitFormatNegotiator.prepare(
+            delay,
+            sourceChannelCount: 2,
+            sampleRate: rate,
+            displayName: "AUDelay"
+        )
+        engine.attach(source)
+        engine.attach(matrix)
+        engine.attach(delay)
+        try MatrixMixerConfigurator.setStreamFormats(
+            matrix,
+            input: hardware,
+            output: delay.inputFormat(forBus: 0)
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: source,
+            to: matrix,
+            format: hardware,
+            operation: "Connect hardware-layout source"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: matrix,
+            to: delay,
+            format: delay.inputFormat(forBus: 0),
+            operation: "Connect Audio Unit input"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: delay,
+            to: engine.mainMixerNode,
+            format: processing,
+            operation: "Connect Audio Unit output"
+        )
+        engine.mainMixerNode.outputVolume = 0
+        engine.prepare()
+        try MatrixMixerConfigurator.configure(matrix, routes: [(0, 0, 1), (1, 1, 1)])
+        try engine.start()
+        try await Task.sleep(for: .milliseconds(50))
         engine.stop()
     }
 

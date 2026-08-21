@@ -4,11 +4,17 @@ import AVFAudio
 import SwiftUI
 
 @MainActor
+protocol PlugInVisibilityControlling: AnyObject {
+    func setPlugInVisible(_ visible: Bool)
+}
+
+@MainActor
 final class GenericAudioUnitSession: ObservableObject {
     let rows: [AudioUnitParameterRow]
     @Published var values: [AUParameterAddress: AUValue]
+    private let tree: AUParameterTree?
     private let parameters: [AUParameterAddress: AUParameter]
-    nonisolated(unsafe) private var observerTokens: [(AUParameter, AUParameterObserverToken)] = []
+    nonisolated(unsafe) private var observerToken: (AUParameterTree, AUParameterObserverToken)?
 
     init(unit: AVAudioUnit) {
         let tree = unit.auAudioUnit.parameterTree
@@ -20,23 +26,40 @@ final class GenericAudioUnitSession: ObservableObject {
             parameters[row.address] = parameter
             values[row.address] = parameter.value
         }
+        self.tree = tree
         self.rows = rows
         self.parameters = parameters
         self.values = values
-        for (address, parameter) in parameters {
-            let token = parameter.token(byAddingParameterObserver: { [weak self] _, value in
-                Task { @MainActor in
-                    self?.values[address] = value
-                }
-            })
-            observerTokens.append((parameter, token))
-        }
     }
 
     deinit {
-        for (parameter, token) in observerTokens {
-            parameter.removeParameterObserver(token)
+        stopObserving()
+    }
+
+    func startObserving() {
+        guard observerToken == nil, let tree else { return }
+        resync()
+        let token = tree.token(byAddingParameterObserver: { [weak self] address, value in
+            Task { @MainActor in
+                self?.values[address] = value
+            }
+        })
+        observerToken = (tree, token)
+    }
+
+    nonisolated func stopObserving() {
+        if let (tree, token) = observerToken {
+            tree.removeParameterObserver(token)
+            observerToken = nil
         }
+    }
+
+    func resync() {
+        var next = values
+        for (address, parameter) in parameters {
+            next[address] = parameter.value
+        }
+        values = next
     }
 
     func setValue(_ value: AUValue, for row: AudioUnitParameterRow) {
@@ -66,11 +89,7 @@ final class GenericAudioUnitSession: ObservableObject {
 
 
 struct GenericAudioUnitView: View {
-    @StateObject private var session: GenericAudioUnitSession
-
-    init(unit: AVAudioUnit) {
-        _session = StateObject(wrappedValue: GenericAudioUnitSession(unit: unit))
-    }
+    @ObservedObject var session: GenericAudioUnitSession
 
     var body: some View {
         if session.rows.isEmpty {
@@ -139,10 +158,34 @@ struct GenericAudioUnitView: View {
     }
 }
 
+@MainActor
+final class GenericAudioUnitHostingController: NSHostingController<GenericAudioUnitView>, PlugInVisibilityControlling {
+    private let session: GenericAudioUnitSession
+
+    init(session: GenericAudioUnitSession) {
+        self.session = session
+        super.init(rootView: GenericAudioUnitView(session: session))
+    }
+
+    @available(*, unavailable)
+    required init?(coder: NSCoder) {
+        fatalError("init(coder:) has not been implemented")
+    }
+
+    func setPlugInVisible(_ visible: Bool) {
+        if visible {
+            session.startObserving()
+        } else {
+            session.stopObserving()
+        }
+    }
+}
+
 enum GenericAudioUnitHost {
     @MainActor
     static func viewController(for unit: AVAudioUnit) -> NSViewController {
-        let controller = NSHostingController(rootView: GenericAudioUnitView(unit: unit))
+        let session = GenericAudioUnitSession(unit: unit)
+        let controller = GenericAudioUnitHostingController(session: session)
         controller.title = unit.auAudioUnit.audioUnitName ?? unit.name
         controller.preferredContentSize = NSSize(width: 480, height: 420)
         return controller

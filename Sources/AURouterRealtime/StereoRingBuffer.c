@@ -115,10 +115,17 @@ uint32_t ARStereoRingBufferWrite(
         atomic_fetch_add_explicit(&ring->overruns, 1, memory_order_relaxed);
     }
 
-    for (uint32_t frame = 0; frame < framesToWrite; frame++) {
-        uint32_t index = (uint32_t)(write + frame) & ring->mask;
-        ring->left[index] = left[frame];
-        ring->right[index] = right[frame];
+    uint32_t start = (uint32_t)write & ring->mask;
+    uint32_t firstSpan = framesToWrite;
+    if (start + framesToWrite > ring->capacity) {
+        firstSpan = ring->capacity - start;
+    }
+    memcpy(ring->left + start, left, firstSpan * sizeof(float));
+    memcpy(ring->right + start, right, firstSpan * sizeof(float));
+    if (firstSpan < framesToWrite) {
+        uint32_t secondSpan = framesToWrite - firstSpan;
+        memcpy(ring->left, left + firstSpan, secondSpan * sizeof(float));
+        memcpy(ring->right, right + firstSpan, secondSpan * sizeof(float));
     }
     atomic_store_explicit(&ring->writeFrame, write + framesToWrite, memory_order_release);
     return framesToWrite;
@@ -134,14 +141,13 @@ uint32_t ARStereoRingBufferRead(
         return 0;
     }
 
-    memset(left, 0, frameCount * sizeof(float));
-    memset(right, 0, frameCount * sizeof(float));
-
     uint64_t read = atomic_load_explicit(&ring->readFrame, memory_order_relaxed);
     uint64_t write = atomic_load_explicit(&ring->writeFrame, memory_order_acquire);
     uint32_t available = (uint32_t)(write - read);
     if (!ring->primed) {
         if (available < ring->target) {
+            memset(left, 0, frameCount * sizeof(float));
+            memset(right, 0, frameCount * sizeof(float));
             return 0;
         }
         ring->primed = true;
@@ -158,22 +164,24 @@ uint32_t ARStereoRingBufferRead(
     uint64_t finalSourceFrame = (uint64_t)floor(lastPosition) + 1;
     if (finalSourceFrame >= available) {
         atomic_fetch_add_explicit(&ring->underruns, 1, memory_order_relaxed);
+        memset(left, 0, frameCount * sizeof(float));
+        memset(right, 0, frameCount * sizeof(float));
         return 0;
     }
 
+    double position = ring->readFraction;
     for (uint32_t frame = 0; frame < frameCount; frame++) {
-        double position = ring->readFraction + (double)frame * ratio;
-        uint64_t whole = (uint64_t)floor(position);
+        uint64_t whole = (uint64_t)position;
         float fraction = (float)(position - (double)whole);
         uint32_t first = (uint32_t)(read + whole) & ring->mask;
         uint32_t second = (first + 1) & ring->mask;
         left[frame] = ring->left[first] + (ring->left[second] - ring->left[first]) * fraction;
         right[frame] = ring->right[first] + (ring->right[second] - ring->right[first]) * fraction;
+        position += ratio;
     }
 
-    double nextPosition = ring->readFraction + (double)frameCount * ratio;
-    uint64_t consumed = (uint64_t)floor(nextPosition);
-    ring->readFraction = nextPosition - (double)consumed;
+    uint64_t consumed = (uint64_t)position;
+    ring->readFraction = position - (double)consumed;
     atomic_store_explicit(&ring->readFrame, read + consumed, memory_order_release);
     return frameCount;
 }

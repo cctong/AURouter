@@ -59,13 +59,18 @@ final class ExtraOutputGraph: @unchecked Sendable {
         let source = CrossDeviceSourceNodeFactory.make(format: sourceFormat, ring: ring)
         let outputNode = engine.outputNode
         try ExtraOutputGraph.setCurrentDevice(device.id, on: outputNode)
-        let hardwareOutputFormat = outputNode.inputFormat(forBus: 0)
-        guard hardwareOutputFormat.channelCount > 0 else {
-            throw AURouterError.unavailable("The extra output device has no active output stream.")
-        }
+        let hardwareOutputFormat = try HardwareOutputStream.apply(
+            to: outputNode,
+            channelCount: Int(device.outputChannelCount)
+        )
 
         engine.attach(source)
         engine.attach(matrix)
+        try MatrixMixerConfigurator.setStreamFormats(
+            matrix,
+            input: sourceFormat,
+            output: hardwareOutputFormat
+        )
         try AudioGraphConnector.connect(
             engine,
             from: source,
