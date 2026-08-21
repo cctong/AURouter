@@ -86,4 +86,77 @@ import Testing
     #expect(change == .stopRoute("An output device was disconnected."))
 }
 
+@Test func hardwareChangeResumesWhenDisconnectedDevicesReturn() {
+    let pending = AudioHardwareResumeTarget(
+        inputUID: "input-a",
+        outputUIDs: ["output-a"],
+        inputRate: 48_000,
+        outputRates: ["output-a": 48_000]
+    )
+    let change = AudioHardwareChangeEvaluator.evaluate(
+        currentUIDs: ["input-a", "output-a"],
+        runningInputUID: nil,
+        runningOutputUID: nil,
+        currentInputRate: 48_000,
+        currentOutputRates: ["output-a": 48_000],
+        pendingResume: pending
+    )
+    #expect(change == .resumeRoute)
+}
+
+@Test func hardwareChangeWaitsWhileDisconnectedDeviceIsStillMissing() {
+    let pending = AudioHardwareResumeTarget(
+        inputUID: "input-a",
+        outputUIDs: ["output-a"],
+        inputRate: 48_000,
+        outputRates: ["output-a": 48_000]
+    )
+    let change = AudioHardwareChangeEvaluator.evaluate(
+        currentUIDs: ["output-a"],
+        runningInputUID: nil,
+        runningOutputUID: nil,
+        currentInputRate: nil,
+        currentOutputRates: ["output-a": 48_000],
+        pendingResume: pending
+    )
+    #expect(change == .refreshCatalog)
+}
+
+@Test func hardwareChangeWaitsWhenReturnedDeviceRateDiffers() {
+    let pending = AudioHardwareResumeTarget(
+        inputUID: "input-a",
+        outputUIDs: ["output-a"],
+        inputRate: 48_000,
+        outputRates: ["output-a": 48_000]
+    )
+    let change = AudioHardwareChangeEvaluator.evaluate(
+        currentUIDs: ["input-a", "output-a"],
+        runningInputUID: nil,
+        runningOutputUID: nil,
+        currentInputRate: 48_000,
+        currentOutputRates: ["output-a": 44_100],
+        pendingResume: pending
+    )
+    #expect(change == .refreshCatalog)
+}
+
+@Test func hardwareChangeResumesWhenReturnedRateIsWithinJitter() {
+    let pending = AudioHardwareResumeTarget(
+        inputUID: "input-a",
+        outputUIDs: ["output-a"],
+        inputRate: 48_000,
+        outputRates: ["output-a": 48_000]
+    )
+    let change = AudioHardwareChangeEvaluator.evaluate(
+        currentUIDs: ["input-a", "output-a"],
+        runningInputUID: nil,
+        runningOutputUID: nil,
+        currentInputRate: 48_000.1,
+        currentOutputRates: ["output-a": 48_000],
+        pendingResume: pending
+    )
+    #expect(change == .resumeRoute)
+}
+
+
 

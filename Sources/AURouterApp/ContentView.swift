@@ -7,24 +7,61 @@ struct ContentView: View {
     @State private var profileName = ""
     @State private var isAddingEffect = false
     @State private var effectQuery = ""
+    @State private var profileToDelete: RoutingProfile?
+
     var body: some View {
         VStack(spacing: 0) {
             transport
-            Divider()
-            HStack(alignment: .top, spacing: 0) {
+            Rectangle()
+                .fill(AURouterLook.legend.opacity(0.25))
+                .frame(height: 1)
+            ScrollView {
                 VStack(spacing: 0) {
-                    inputColumn
-                    Divider()
-                    outputColumn
+                    inputModule
+                    PatchCord(isLive: viewModel.isRunning)
+                    if viewModel.chain.isEmpty {
+                        addEffectButton(emptySlot: true)
+                    } else {
+                        ForEach(Array(viewModel.chain.enumerated()), id: \.element.id) { index, slot in
+                            ChainGraphNode(
+                                title: viewModel.effectTitle(for: slot),
+                                isRunning: viewModel.isRunning,
+                                isFirst: index == 0,
+                                isLast: index == viewModel.chain.count - 1,
+                                bypass: bypassBinding(for: slot),
+                                canOpenUI: viewModel.canOpenPlugInUI(for: slot.id),
+                                onOpenUI: { viewModel.openPlugInUI(for: slot.id) },
+                                onMoveUp: { viewModel.moveSlot(slot.id, by: -1) },
+                                onMoveDown: { viewModel.moveSlot(slot.id, by: 1) },
+                                onRemove: { viewModel.removeSlot(slot.id) }
+                            )
+                            if index < viewModel.chain.count - 1 {
+                                PatchCord(
+                                    isLive: viewModel.isRunning && !slot.bypassed,
+                                    isUnplugged: slot.bypassed
+                                )
+                            }
+                        }
+                    }
+                    PatchCord(
+                        isLive: viewModel.isRunning && !(viewModel.chain.last?.bypassed ?? false),
+                        isUnplugged: viewModel.chain.last?.bypassed ?? false
+                    )
+                    gainModule
+                    PatchCord(isLive: viewModel.isRunning && !viewModel.isPanicMuted)
+                    outputModule
+                    if !viewModel.chain.isEmpty {
+                        addEffectButton(emptySlot: false)
+                            .padding(.top, 12)
+                    }
                 }
-                .frame(maxWidth: .infinity)
-                Divider()
-                chainColumn
-                    .frame(maxWidth: .infinity)
+                .padding(16)
             }
         }
+        .background(AURouterLook.rack)
+        .preferredColorScheme(.dark)
         .alert(
-            "AURouter",
+            viewModel.errorTitle,
             isPresented: Binding(
                 get: { viewModel.errorMessage != nil },
                 set: { if !$0 { viewModel.clearError() } }
@@ -44,183 +81,274 @@ struct ContentView: View {
                 profileName = ""
             }
         }
+        .confirmationDialog(
+            "Delete Profile?",
+            isPresented: Binding(
+                get: { profileToDelete != nil },
+                set: { if !$0 { profileToDelete = nil } }
+            ),
+            titleVisibility: .visible
+        ) {
+            Button("Delete “\(profileToDelete?.name ?? "Profile")”", role: .destructive) {
+                if let profile = profileToDelete {
+                    viewModel.deleteProfile(profile)
+                }
+                profileToDelete = nil
+            }
+            Button("Cancel", role: .cancel) {
+                profileToDelete = nil
+            }
+        } message: {
+            Text("This cannot be undone.")
+        }
     }
 
     private var transport: some View {
-        HStack(spacing: 12) {
-            Circle()
-                .fill(viewModel.isRunning ? Color.green : Color.secondary)
-                .frame(width: 9, height: 9)
-            Text(routeSummary)
-                .font(.headline)
-                .lineLimit(1)
-            Spacer()
-            Menu("Profiles") {
-                Button("Save As…") {
-                    profileName = ""
-                    isSavingProfile = true
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 10) {
+                Circle()
+                    .fill(transportLED)
+                    .frame(width: 8, height: 8)
+                VStack(alignment: .leading, spacing: 2) {
+                    Text(routeSummary)
+                        .font(AURouterLook.routeFont)
+                        .foregroundStyle(.white)
+                        .lineLimit(1)
+                    Text(transportCaption)
+                        .font(AURouterLook.readoutFont)
+                        .foregroundStyle(transportCaptionColor)
+                        .lineLimit(2)
                 }
-                .disabled(!viewModel.canStart && viewModel.chain.isEmpty)
-                if !viewModel.profiles.isEmpty {
-                    Divider()
-                    ForEach(viewModel.profiles) { profile in
-                        Button(profile.name) {
-                            viewModel.loadProfile(profile)
-                        }
-                    }
-                    Divider()
-                    ForEach(viewModel.profiles) { profile in
-                        Button("Delete \(profile.name)", role: .destructive) {
-                            viewModel.deleteProfile(profile)
-                        }
-                    }
+                Spacer(minLength: 8)
+                if viewModel.isScanningEffects {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(AURouterLook.tip)
+                        .help("Scanning Audio Units in an isolated process")
                 }
+                profilesMenu
+                panicButton
+                startButton
             }
-            Menu {
-                Toggle(
-                    "Launch at login",
-                    isOn: Binding(
-                        get: { viewModel.launchesAtLogin },
-                        set: { viewModel.setLaunchesAtLogin($0) }
-                    )
-                )
-            } label: {
-                Image(systemName: "gearshape")
-            }
-            .menuIndicator(.hidden)
-            .help("Settings")
-            Button("Panic Mute", systemImage: "speaker.slash.fill") {
-                viewModel.panicMute()
-            }
-            .buttonStyle(.bordered)
-            .tint(.red)
-            .disabled(!viewModel.isRunning)
-            Button(viewModel.isRunning ? "Stop" : "Start") {
-                viewModel.toggleRouting()
-            }
-            .buttonStyle(.borderedProminent)
-            .tint(viewModel.isRunning ? .red : .accentColor)
-            .disabled(!viewModel.isRunning && !viewModel.canStart)
+            GainControl(gain: $viewModel.gain, isMuted: viewModel.isPanicMuted)
         }
         .padding(.horizontal, 16)
         .padding(.vertical, 12)
+        .background(AURouterLook.rack)
     }
 
-    private var inputColumn: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            columnTitle("Input")
+    private var transportLED: Color {
+        AURouterLook.statusColor(
+            isRunning: viewModel.isRunning,
+            isBusy: viewModel.isBusy,
+            isMuted: viewModel.isPanicMuted
+        )
+    }
+
+    private var transportCaption: String {
+        if viewModel.isPanicMuted {
+            return "Muted. Restore Gain or raise the fader."
+        }
+        if viewModel.isBusy {
+            return viewModel.statusMessage
+        }
+        if viewModel.isRunning && viewModel.gain == 0 {
+            return "Raise gain to hear output."
+        }
+        if viewModel.isRunning {
+            return clockingCaption
+        }
+        if let reason = viewModel.startBlockedReason {
+            return reason
+        }
+        return clockingCaption
+    }
+
+    private var transportCaptionColor: Color {
+        if viewModel.isPanicMuted { return AURouterLook.clip }
+        if viewModel.isRunning && viewModel.gain == 0 { return AURouterLook.warn }
+        if viewModel.isBusy { return AURouterLook.warn }
+        return AURouterLook.legend
+    }
+
+    private var profilesMenu: some View {
+        Menu("Profiles") {
+            Button("Save As…") {
+                profileName = ""
+                isSavingProfile = true
+            }
+            .disabled(!viewModel.canStart && viewModel.chain.isEmpty)
+            if !viewModel.profiles.isEmpty {
+                Divider()
+                ForEach(viewModel.profiles) { profile in
+                    Button(profile.name) {
+                        viewModel.loadProfile(profile)
+                    }
+                }
+                Divider()
+                ForEach(viewModel.profiles) { profile in
+                    Button("Delete \(profile.name)…", role: .destructive) {
+                        profileToDelete = profile
+                    }
+                }
+            }
+        }
+    }
+
+    private var panicButton: some View {
+        Button(
+            viewModel.isPanicMuted ? "Restore Gain" : "Panic Mute",
+            systemImage: viewModel.isPanicMuted ? "speaker.wave.2.fill" : "speaker.slash.fill"
+        ) {
+            viewModel.panicMute()
+        }
+        .buttonStyle(.bordered)
+        .tint(viewModel.isPanicMuted ? AURouterLook.tip : AURouterLook.clip)
+        .disabled(!viewModel.canPanic)
+        .help(viewModel.isPanicMuted ? "Restore the previous output gain." : "Silence output immediately.")
+    }
+
+    private var startButton: some View {
+        Button {
+            viewModel.toggleRouting()
+        } label: {
+            if viewModel.isBusy {
+                HStack(spacing: 6) {
+                    ProgressView()
+                        .controlSize(.small)
+                        .tint(AURouterLook.tip)
+                    Text("Starting…")
+                }
+            } else {
+                Text(viewModel.isRunning ? "Stop" : "Start")
+            }
+        }
+        .buttonStyle(.borderedProminent)
+        .tint(viewModel.isRunning ? AURouterLook.tip : AURouterLook.face)
+        .foregroundStyle(viewModel.isRunning ? AURouterLook.rack : AURouterLook.tip)
+        .disabled((!viewModel.isRunning && !viewModel.canStart) || viewModel.isBusy)
+        .help(startHelp)
+    }
+
+    private var startHelp: String {
+        if viewModel.isBusy { return viewModel.statusMessage }
+        if viewModel.isRunning { return "Stop the live route." }
+        return viewModel.startBlockedReason ?? "Start routing this path."
+    }
+
+    private var inputModule: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("INPUT")
+                    .font(AURouterLook.legendFont)
+                    .foregroundStyle(AURouterLook.legend)
+                Spacer()
+                if let device = viewModel.selectedInputDevice {
+                    formatCaption(device)
+                }
+            }
             Picker("Device", selection: $viewModel.selectedInputDeviceUID) {
                 ForEach(viewModel.inputDevices) { device in
                     Text(device.name).tag(device.uid)
                 }
             }
-            .disabled(viewModel.isRunning)
+            .labelsHidden()
+            .lockedWhileRunning(viewModel.isRunning)
             Picker("Channels", selection: $viewModel.selectedInputSelectionID) {
                 ForEach(viewModel.inputSelections) { selection in
                     Text(selection.displayName).tag(selection.id)
                 }
             }
-            .disabled(viewModel.isRunning)
-            if let device = viewModel.selectedInputDevice {
-                formatCaption(device)
-            }
-            LevelMeter(level: viewModel.inputLevel)
+            .labelsHidden()
+            .lockedWhileRunning(viewModel.isRunning)
+            LevelMeter(level: viewModel.inputLevel, isLive: viewModel.isRunning)
         }
-        .padding(16)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .patchChrome(isLive: viewModel.isRunning)
     }
 
-    private var outputColumn: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            columnTitle("Output")
+    private var gainModule: some View {
+        HStack {
+            Text("GAIN")
+                .font(AURouterLook.legendFont)
+                .foregroundStyle(AURouterLook.legend)
+            Spacer()
+            Text(viewModel.isPanicMuted ? "MUTE" : String(format: "%.0f%%", viewModel.gain * 100))
+                .font(AURouterLook.readoutFont)
+                .foregroundStyle(viewModel.isPanicMuted ? AURouterLook.clip : AURouterLook.legend)
+        }
+        .padding(.horizontal, 12)
+        .padding(.vertical, 10)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .patchChrome(isLive: viewModel.isRunning, isMuted: viewModel.isPanicMuted)
+    }
+
+    private var outputModule: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            HStack {
+                Text("OUTPUT")
+                    .font(AURouterLook.legendFont)
+                    .foregroundStyle(AURouterLook.legend)
+                Spacer()
+                if let device = viewModel.selectedOutputDevice {
+                    formatCaption(device)
+                }
+            }
             Picker("Device", selection: $viewModel.selectedOutputDeviceUID) {
                 ForEach(viewModel.outputDevices) { device in
                     Text(device.name).tag(device.uid)
                 }
             }
-            .disabled(viewModel.isRunning)
+            .labelsHidden()
+            .lockedWhileRunning(viewModel.isRunning)
             ForEach(viewModel.outputDestinations) { destination in
-                HStack {
-                    Picker("Channels", selection: outputPairBinding(for: destination)) {
-                        ForEach(viewModel.outputPairs) { pair in
-                            Text(pair.displayName).tag(pair.id)
-                        }
-                    }
-                    .disabled(viewModel.isRunning)
-                    if viewModel.outputDestinations.count > 1 {
-                        Button(role: .destructive) {
-                            viewModel.removeOutputPair(destination.id)
-                        } label: {
-                            Image(systemName: "xmark")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(viewModel.isRunning)
-                    }
-                    if destination.id == viewModel.outputDestinations.last?.id {
-                        Menu {
-                            ForEach(viewModel.unusedOutputPairs) { pair in
-                                Button(pair.displayName) {
-                                    viewModel.addOutputPair(pair)
-                                }
-                            }
-                        } label: {
-                            Image(systemName: "plus")
-                        }
-                        .buttonStyle(.borderless)
-                        .disabled(!viewModel.canAddOutputPair)
-                    }
-                }
+                pairRow(
+                    binding: outputPairBinding(for: destination),
+                    pairs: viewModel.outputPairs,
+                    canRemove: viewModel.outputDestinations.count > 1,
+                    onRemove: { viewModel.removeOutputPair(destination.id) },
+                    showsAdd: destination.id == viewModel.outputDestinations.last?.id,
+                    unused: viewModel.unusedOutputPairs,
+                    canAdd: viewModel.canAddOutputPair,
+                    onAdd: { viewModel.addOutputPair($0) }
+                )
             }
             ForEach(viewModel.extraOutputSlots) { slot in
-                Divider()
+                Rectangle()
+                    .fill(AURouterLook.legend.opacity(0.2))
+                    .frame(height: 1)
+                    .padding(.vertical, 2)
                 HStack {
                     Picker("Device", selection: extraDeviceBinding(for: slot)) {
                         ForEach(extraDeviceChoices(for: slot)) { device in
                             Text(device.name).tag(device.uid)
                         }
                     }
-                    .disabled(viewModel.isRunning)
+                    .labelsHidden()
+                    .lockedWhileRunning(viewModel.isRunning)
                     Button(role: .destructive) {
                         viewModel.removeOutputDevice(slot.id)
                     } label: {
                         Image(systemName: "xmark")
                     }
                     .buttonStyle(.borderless)
-                    .disabled(viewModel.isRunning)
+                    .lockedWhileRunning(viewModel.isRunning)
                 }
                 ForEach(slot.pairSlots) { destination in
-                    HStack {
-                        Picker("Channels", selection: extraPairBinding(for: destination, on: slot)) {
-                            ForEach(viewModel.extraOutputPairs(for: slot)) { pair in
-                                Text(pair.displayName).tag(pair.id)
-                            }
-                        }
-                        .disabled(viewModel.isRunning)
-                        if slot.pairSlots.count > 1 {
-                            Button(role: .destructive) {
-                                viewModel.removeExtraOutputPair(destination.id, on: slot.id)
-                            } label: {
-                                Image(systemName: "xmark")
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(viewModel.isRunning)
-                        }
-                        if destination.id == slot.pairSlots.last?.id {
-                            Menu {
-                                ForEach(viewModel.unusedExtraOutputPairs(for: slot)) { pair in
-                                    Button(pair.displayName) {
-                                        viewModel.addExtraOutputPair(pair, on: slot.id)
-                                    }
-                                }
-                            } label: {
-                                Image(systemName: "plus")
-                            }
-                            .buttonStyle(.borderless)
-                            .disabled(!viewModel.canAddExtraOutputPair(for: slot))
-                        }
-                    }
+                    pairRow(
+                        binding: extraPairBinding(for: destination, on: slot),
+                        pairs: viewModel.extraOutputPairs(for: slot),
+                        canRemove: slot.pairSlots.count > 1,
+                        onRemove: { viewModel.removeExtraOutputPair(destination.id, on: slot.id) },
+                        showsAdd: destination.id == slot.pairSlots.last?.id,
+                        unused: viewModel.unusedExtraOutputPairs(for: slot),
+                        canAdd: viewModel.canAddExtraOutputPair(for: slot),
+                        onAdd: { viewModel.addExtraOutputPair($0, on: slot.id) }
+                    )
                 }
             }
-            Menu("Add output device") {
+            Menu("Add output") {
                 ForEach(viewModel.unusedOutputDevices) { device in
                     Button(device.name) {
                         viewModel.addOutputDevice(device)
@@ -228,106 +356,110 @@ struct ContentView: View {
                 }
             }
             .disabled(!viewModel.canAddOutputDevice)
-            if let device = viewModel.selectedOutputDevice {
-                formatCaption(device)
-            }
-            LevelMeter(level: viewModel.outputLevel)
-            HStack {
-                Text("Gain")
-                    .foregroundStyle(.secondary)
-                Slider(value: $viewModel.gain, in: 0...2)
-                Text(String(format: "%.0f%%", viewModel.gain * 100))
-                    .monospacedDigit()
-                    .frame(width: 44, alignment: .trailing)
-            }
-            Spacer(minLength: 0)
+            .help(viewModel.isRunning ? "Stop routing to change devices." : "Route to another output device")
+            LevelMeter(level: viewModel.outputLevel, isLive: viewModel.isRunning)
         }
-        .padding(16)
+        .padding(12)
+        .frame(maxWidth: .infinity, alignment: .leading)
+        .patchChrome(isLive: viewModel.isRunning)
     }
 
-    private var chainColumn: some View {
-        VStack(alignment: .leading, spacing: 10) {
-            columnTitle("Chain")
-            ScrollView {
-                VStack(spacing: 0) {
-                    GraphPort(title: inputPortTitle, subtitle: inputPortSubtitle)
-                    GraphEdge()
-                    if viewModel.chain.isEmpty {
-                        GraphPort(title: "Dry", subtitle: "no Audio Unit")
-                    } else {
-                        ForEach(Array(viewModel.chain.enumerated()), id: \.element.id) { index, slot in
-                            ChainGraphNode(
-                                title: viewModel.effectTitle(for: slot),
-                                isRunning: viewModel.isRunning,
-                                isFirst: index == 0,
-                                isLast: index == viewModel.chain.count - 1,
-                                bypass: bypassBinding(for: slot),
-                                canOpenUI: viewModel.canOpenPlugInUI(for: slot.id),
-                                onOpenUI: { viewModel.openPlugInUI(for: slot.id) },
-                                onMoveUp: { viewModel.moveSlot(slot.id, by: -1) },
-                                onMoveDown: { viewModel.moveSlot(slot.id, by: 1) },
-                                onRemove: { viewModel.removeSlot(slot.id) }
-                            )
-                            if index < viewModel.chain.count - 1 {
-                                GraphEdge()
-                            }
-                        }
-                    }
-                    GraphEdge()
-                    GraphPort(
-                        title: "Gain",
-                        subtitle: String(format: "%.0f%%", viewModel.gain * 100)
-                    )
-                    if graphOutputs.count <= 1 {
-                        GraphEdge()
-                        if let output = graphOutputs.first {
-                            GraphPort(title: output.title, subtitle: output.subtitle)
-                        } else {
-                            GraphPort(title: "Output", subtitle: nil)
-                        }
-                    } else {
-                        HStack(alignment: .top, spacing: 6) {
-                            ForEach(graphOutputs) { output in
-                                VStack(spacing: 0) {
-                                    GraphEdge()
-                                    GraphPort(title: output.title, subtitle: output.subtitle)
-                                }
-                                .frame(maxWidth: .infinity)
-                            }
-                        }
-                    }
-                }
-                .frame(maxWidth: .infinity)
-            }
-            HStack {
-                Button("Add Audio Unit") {
-                    effectQuery = ""
-                    isAddingEffect = true
-                }
-                .disabled(!viewModel.canAddEffect)
-                .popover(isPresented: $isAddingEffect) {
-                    EffectSearchPopover(
-                        query: $effectQuery,
-                        groups: filteredEffects,
-                        onSelect: { effect in
-                            viewModel.addEffect(effect)
-                            isAddingEffect = false
-                        }
-                    )
-                    .frame(width: 300, height: 360)
-                }
-                if viewModel.isScanningEffects {
-                    ProgressView()
-                        .controlSize(.small)
-                        .help("Scanning Audio Units in an isolated process")
+    private func pairRow(
+        binding: Binding<String>,
+        pairs: [ChannelPair],
+        canRemove: Bool,
+        onRemove: @escaping () -> Void,
+        showsAdd: Bool,
+        unused: [ChannelPair],
+        canAdd: Bool,
+        onAdd: @escaping (ChannelPair) -> Void
+    ) -> some View {
+        HStack {
+            Picker("Channels", selection: binding) {
+                ForEach(pairs) { pair in
+                    Text(pair.displayName).tag(pair.id)
                 }
             }
-            Text(clockingCaption)
-                .font(.caption)
-                .foregroundStyle(.secondary)
-            Spacer(minLength: 0)
+            .labelsHidden()
+            .lockedWhileRunning(viewModel.isRunning)
+            if canRemove {
+                Button(role: .destructive, action: onRemove) {
+                    Image(systemName: "xmark")
+                }
+                .buttonStyle(.borderless)
+                .lockedWhileRunning(viewModel.isRunning)
+            }
+            if showsAdd {
+                Menu {
+                    ForEach(unused) { pair in
+                        Button(pair.displayName) {
+                            onAdd(pair)
+                        }
+                    }
+                } label: {
+                    Image(systemName: "plus")
+                }
+                .buttonStyle(.borderless)
+                .disabled(!canAdd)
+                .help(viewModel.isRunning ? "Stop routing to change devices." : "Add an output pair")
+            }
         }
-        .padding(16)
+    }
+
+    @ViewBuilder
+    private func addEffectButton(emptySlot: Bool) -> some View {
+        if emptySlot {
+            Button {
+                openEffectSearch()
+            } label: {
+                Text("Add Audio Unit")
+                    .font(AURouterLook.legendFont)
+                    .frame(maxWidth: .infinity)
+                    .padding(.vertical, 12)
+            }
+            .buttonStyle(.plain)
+            .foregroundStyle(AURouterLook.tip)
+            .background(AURouterLook.face, in: RoundedRectangle(cornerRadius: AURouterLook.corner))
+            .overlay(
+                RoundedRectangle(cornerRadius: AURouterLook.corner)
+                    .strokeBorder(
+                        AURouterLook.tip.opacity(0.5),
+                        style: StrokeStyle(lineWidth: 1, dash: [5, 4])
+                    )
+            )
+            .disabled(!viewModel.canAddEffect)
+            .help(viewModel.addEffectBlockedReason ?? "Add an Audio Unit to the chain.")
+            .popover(isPresented: $isAddingEffect, arrowEdge: .bottom) {
+                effectSearchPopover
+            }
+        } else {
+            Button("Add Audio Unit") {
+                openEffectSearch()
+            }
+            .disabled(!viewModel.canAddEffect)
+            .help(viewModel.addEffectBlockedReason ?? "Add an Audio Unit to the chain.")
+            .popover(isPresented: $isAddingEffect, arrowEdge: .top) {
+                effectSearchPopover
+            }
+        }
+    }
+
+    private func openEffectSearch() {
+        effectQuery = ""
+        isAddingEffect = true
+    }
+
+    private var effectSearchPopover: some View {
+        EffectSearchPopover(
+            query: $effectQuery,
+            groups: filteredEffects,
+            onSelect: { effect in
+                viewModel.addEffect(effect)
+                isAddingEffect = false
+            }
+        )
+        .frame(width: 300, height: 360)
+        .preferredColorScheme(.dark)
     }
 
     private var routeSummary: String {
@@ -353,15 +485,15 @@ struct ContentView: View {
     private var clockingCaption: String {
         guard let input = viewModel.selectedInputDevice,
               let output = viewModel.selectedOutputDevice else {
-            return "Select input and output devices."
+            return "Choose input and output."
         }
         if !viewModel.extraOutputSlots.isEmpty {
-            return "Split to \(1 + viewModel.extraOutputSlots.count) output devices · \(latencyCaption(input: input, output: output))"
+            return "Split to \(1 + viewModel.extraOutputSlots.count) outputs · \(latencyCaption(input: input, output: output))"
         }
         if input.id == output.id {
-            return "Same-device clock · \(Int(output.nominalSampleRate)) Hz"
+            return "Same clock · \(Int(output.nominalSampleRate)) Hz"
         }
-        return "Adaptive cross-device bridge · \(latencyCaption(input: input, output: output))"
+        return "Different clocks · \(latencyCaption(input: input, output: output))"
     }
 
     private func latencyCaption(input: AudioDevice, output: AudioDevice) -> String {
@@ -373,53 +505,6 @@ struct ContentView: View {
             sampleRate: output.nominalSampleRate
         )
         return "~\(milliseconds) ms"
-    }
-    private var graphOutputs: [GraphOutputPort] {
-        var ports: [GraphOutputPort] = []
-        if let device = viewModel.selectedOutputDevice {
-            let pairs = viewModel.selectedOutputPairs
-            if pairs.isEmpty {
-                ports.append(GraphOutputPort(id: device.uid, title: device.name, subtitle: nil))
-            } else {
-                for pair in pairs {
-                    ports.append(
-                        GraphOutputPort(
-                            id: "\(device.uid)-\(pair.id)",
-                            title: device.name,
-                            subtitle: pair.displayName
-                        )
-                    )
-                }
-            }
-        }
-        for slot in viewModel.extraOutputSlots {
-            let title = viewModel.outputDevices.first { $0.uid == slot.deviceUID }?.name ?? "Output"
-            let pairs = viewModel.extraOutputPairs(for: slot).filter { pair in
-                slot.pairSlots.contains { $0.pairID == pair.id }
-            }
-            if pairs.isEmpty {
-                ports.append(GraphOutputPort(id: slot.id.uuidString, title: title, subtitle: nil))
-            } else {
-                for pair in pairs {
-                    ports.append(
-                        GraphOutputPort(
-                            id: "\(slot.id.uuidString)-\(pair.id)",
-                            title: title,
-                            subtitle: pair.displayName
-                        )
-                    )
-                }
-            }
-        }
-        return ports
-    }
-
-    private var inputPortTitle: String {
-        viewModel.selectedInputDevice?.name ?? "Input"
-    }
-
-    private var inputPortSubtitle: String? {
-        viewModel.inputSelections.first { $0.id == viewModel.selectedInputSelectionID }?.displayName
     }
 
     private var effectsByManufacturer: [(name: String, effects: [AudioEffectDescriptor])] {
@@ -500,18 +585,10 @@ struct ContentView: View {
         )
     }
 
-
-
-    private func columnTitle(_ title: String) -> some View {
-        Text(title)
-            .font(.caption.weight(.semibold))
-            .foregroundStyle(.secondary)
-    }
-
     private func formatCaption(_ device: AudioDevice) -> some View {
-        Text("\(Int(device.nominalSampleRate)) Hz · \(device.bufferFrameSize) frames")
-            .font(.caption)
-            .foregroundStyle(.secondary)
+        Text("\(Int(device.nominalSampleRate)) Hz · \(device.bufferFrameSize) fr")
+            .font(AURouterLook.readoutFont)
+            .foregroundStyle(AURouterLook.legend)
     }
 
     private func bypassBinding(for slot: EffectChainSlot) -> Binding<Bool> {
@@ -519,55 +596,6 @@ struct ContentView: View {
             get: { viewModel.chain.first { $0.id == slot.id }?.bypassed ?? false },
             set: { viewModel.setBypassed(slot.id, $0) }
         )
-    }
-}
-
-private struct GraphOutputPort: Identifiable {
-    let id: String
-    let title: String
-    let subtitle: String?
-}
-
-private struct GraphPort: View {
-    let title: String
-    let subtitle: String?
-
-    var body: some View {
-        VStack(spacing: 2) {
-            Text(title)
-                .font(.caption.weight(.semibold))
-                .lineLimit(1)
-            if let subtitle {
-                Text(subtitle)
-                    .font(.caption2)
-                    .foregroundStyle(.secondary)
-                    .lineLimit(1)
-            }
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 8)
-        .padding(.horizontal, 10)
-        .background(.quaternary.opacity(0.25), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(.secondary.opacity(0.35), style: StrokeStyle(dash: [4, 3]))
-        )
-    }
-}
-
-private struct GraphEdge: View {
-    var body: some View {
-        VStack(spacing: 0) {
-            Rectangle()
-                .fill(.secondary.opacity(0.45))
-                .frame(width: 2, height: 12)
-            Image(systemName: "chevron.down")
-                .font(.system(size: 8, weight: .bold))
-                .foregroundStyle(.secondary)
-        }
-        .frame(maxWidth: .infinity)
-        .padding(.vertical, 2)
-        .accessibilityHidden(true)
     }
 }
 
@@ -584,47 +612,44 @@ private struct ChainGraphNode: View {
     let onRemove: () -> Void
 
     var body: some View {
-        VStack(alignment: .leading, spacing: 6) {
-            Text(title)
-                .font(.callout.weight(.medium))
-                .lineLimit(1)
+        VStack(alignment: .leading, spacing: 8) {
+            HStack(spacing: 8) {
+                Text(title)
+                    .font(.system(size: 13, weight: .semibold).width(.condensed))
+                    .foregroundStyle(bypass ? AURouterLook.legend : Color.white)
+                    .lineLimit(1)
+                Spacer(minLength: 0)
+                Button(action: onOpenUI) {
+                    Image(systemName: "slider.horizontal.3")
+                }
+                .disabled(!canOpenUI)
+                .help("Open Plug-in UI")
+            }
             HStack(spacing: 8) {
                 Toggle("Bypass", isOn: $bypass)
-                    .disabled(!isRunning)
                 Spacer()
                 Button(action: onMoveUp) {
                     Image(systemName: "chevron.up")
                 }
                 .disabled(isRunning || isFirst)
+                .help(isRunning ? "Stop to reorder the chain." : "Move up")
                 Button(action: onMoveDown) {
                     Image(systemName: "chevron.down")
                 }
                 .disabled(isRunning || isLast)
+                .help(isRunning ? "Stop to reorder the chain." : "Move down")
                 Button(role: .destructive, action: onRemove) {
                     Image(systemName: "xmark")
                 }
                 .disabled(isRunning)
+                .help(isRunning ? "Stop to change the chain." : "Remove from chain")
             }
             .buttonStyle(.borderless)
             .controlSize(.small)
         }
-        .padding(8)
+        .padding(10)
         .frame(maxWidth: .infinity, alignment: .leading)
-        .background(.quaternary.opacity(bypass ? 0.2 : 0.45), in: RoundedRectangle(cornerRadius: 8))
-        .overlay(
-            RoundedRectangle(cornerRadius: 8)
-                .strokeBorder(bypass ? Color.secondary.opacity(0.35) : Color.accentColor.opacity(0.45))
-        )
-        .opacity(bypass ? 0.55 : 1)
-        .contentShape(RoundedRectangle(cornerRadius: 8))
-        .onTapGesture {
-            if canOpenUI {
-                onOpenUI()
-            }
-        }
-        .help("Open Plug-in UI")
-        .accessibilityAddTraits(.isButton)
-        .accessibilityHint("Opens the Audio Unit interface")
+        .patchChrome(isLive: isRunning && !bypass)
     }
 }
 
@@ -632,14 +657,16 @@ private struct EffectSearchPopover: View {
     @Binding var query: String
     let groups: [(name: String, effects: [AudioEffectDescriptor])]
     let onSelect: (AudioEffectDescriptor) -> Void
+    @FocusState private var queryFocused: Bool
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
             TextField("Search Audio Units", text: $query)
                 .textFieldStyle(.roundedBorder)
+                .focused($queryFocused)
             if groups.isEmpty {
                 Text("No matching Audio Units.")
-                    .foregroundStyle(.secondary)
+                    .foregroundStyle(AURouterLook.legend)
                     .frame(maxWidth: .infinity, maxHeight: .infinity)
             } else {
                 List {
@@ -658,49 +685,6 @@ private struct EffectSearchPopover: View {
             }
         }
         .padding(12)
-    }
-}
-
-struct LevelMeter: View {
-    let level: Float
-    @State private var peak: Float = 0
-    @State private var peakDate: Date = .distantPast
-
-    var body: some View {
-        TimelineView(.periodic(from: .now, by: 0.05)) { context in
-            let held = heldPeak(now: context.date)
-            GeometryReader { geometry in
-                ZStack(alignment: .leading) {
-                    Capsule().fill(.quaternary)
-                    Capsule()
-                        .fill(level > 0.9 ? Color.red : level > 0.7 ? Color.yellow : Color.green)
-                        .frame(width: geometry.size.width * CGFloat(max(0, min(level, 1))))
-                    Capsule()
-                        .fill(.primary)
-                        .frame(width: 2, height: 10)
-                        .offset(x: max(0, geometry.size.width * CGFloat(max(0, min(held, 1))) - 2))
-                }
-            }
-        }
-        .frame(height: 10)
-        .accessibilityLabel("Audio level")
-        .accessibilityValue("\(Int(level * 100)) percent")
-        .onChange(of: level) { _, newValue in
-            if newValue >= peak {
-                peak = newValue
-                peakDate = Date()
-            }
-        }
-    }
-
-    private func heldPeak(now: Date) -> Float {
-        if level >= peak {
-            return level
-        }
-        let elapsed = now.timeIntervalSince(peakDate)
-        if elapsed < 0.8 {
-            return peak
-        }
-        return max(level, peak - Float(elapsed - 0.8) * 1.25)
+        .onAppear { queryFocused = true }
     }
 }

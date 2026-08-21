@@ -7,15 +7,21 @@ struct AURouterApp: App {
     var body: some Scene {
         WindowGroup(id: "main") {
             ContentView(viewModel: viewModel)
-                .frame(minWidth: 780, minHeight: 520)
+                .frame(minWidth: 520, minHeight: 640)
         }
         .windowResizability(.contentMinSize)
 
         MenuBarExtra {
             MenuBarView(viewModel: viewModel)
         } label: {
-            Image(systemName: viewModel.isRunning ? "waveform.circle.fill" : "waveform")
+            Image(systemName: menuBarSymbol)
         }
         .menuBarExtraStyle(.window)
+    }
+
+    private var menuBarSymbol: String {
+        if viewModel.isPanicMuted { return "speaker.slash.fill" }
+        if viewModel.isRunning { return "waveform.circle.fill" }
+        return "waveform"
     }
 }

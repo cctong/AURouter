@@ -69,15 +69,20 @@ final class RouterViewModel: ObservableObject {
     }
     @Published var gain: Double = 0 {
         didSet {
+            if isPanicMuted, gain > 0 {
+                isPanicMuted = false
+            }
             router.setGain(Float(gain))
             persistSession()
         }
     }
     @Published private(set) var isRunning = false
     @Published private(set) var isBusy = false
+    @Published private(set) var isPanicMuted = false
     @Published private(set) var inputLevel: Float = 0
     @Published private(set) var outputLevel: Float = 0
-    @Published private(set) var statusMessage = "Select a route, then start monitoring."
+    @Published private(set) var statusMessage = "Choose input and output, then Start."
+    @Published private(set) var errorTitle = "Couldn’t start route"
     @Published private(set) var errorMessage: String?
     @Published private(set) var profiles: [RoutingProfile] = RoutingProfileStore.load()
     @Published private(set) var launchesAtLogin = SMAppService.mainApp.status == .enabled
@@ -97,6 +102,9 @@ final class RouterViewModel: ObservableObject {
     private var runningOutputRate: Double?
     private var runningOutputUIDs: Set<String> = []
     private var runningOutputRates: [String: Double] = [:]
+    private var pendingResume: AudioHardwareResumeTarget?
+    private var gainBeforePanic: Double = 0
+
 
     var inputDevices: [AudioDevice] {
         devices.filter(\.supportsInputRouting)
@@ -160,7 +168,7 @@ final class RouterViewModel: ObservableObject {
             launchesAtLogin = SMAppService.mainApp.status == .enabled
         } catch {
             launchesAtLogin = SMAppService.mainApp.status == .enabled
-            errorMessage = error.localizedDescription
+            presentError(title: "Couldn’t update login item", message: error.localizedDescription)
         }
     }
 
@@ -198,6 +206,37 @@ final class RouterViewModel: ObservableObject {
 
     var canAddEffect: Bool {
         !isRunning && chain.count < EffectChain.maximumLength && !effects.isEmpty
+    }
+
+    var canPanic: Bool {
+        isRunning || isBusy || isPanicMuted
+    }
+
+    var startBlockedReason: String? {
+        if selectedInputDevice == nil { return "Choose an input." }
+        if selectedOutputDevice == nil { return "Choose an output." }
+        if selectedInputSelection == nil { return "Choose input channels." }
+        if selectedOutputPairs.isEmpty { return "Choose an output pair." }
+        if extraOutputSlots.contains(where: { slot in
+            !outputDevices.contains { $0.uid == slot.deviceUID }
+                || !slot.pairSlots.contains { destination in
+                    extraOutputPairs(for: slot).contains { $0.id == destination.pairID }
+                }
+        }) {
+            return "Choose channels on the extra output."
+        }
+        return nil
+    }
+
+    var addEffectBlockedReason: String? {
+        if isRunning { return "Stop to change the chain." }
+        if chain.count >= EffectChain.maximumLength {
+            return "Chain is full (\(EffectChain.maximumLength) Audio Units)."
+        }
+        if effects.isEmpty {
+            return isScanningEffects ? "Scanning Audio Units…" : "No Audio Units found."
+        }
+        return nil
     }
 
     func canOpenPlugInUI(for slotID: UUID) -> Bool {
@@ -243,7 +282,7 @@ final class RouterViewModel: ObservableObject {
             }
             if let session = sessionToRestore {
                 applyRestoredSession(session)
-            } else {
+            } else if pendingResume == nil {
                 if !inputDevices.contains(where: { $0.uid == selectedInputDeviceUID }) {
                     selectedInputDeviceUID = inputDevices.first(where: \.isDefaultInput)?.uid
                         ?? inputDevices.first?.uid
@@ -255,12 +294,14 @@ final class RouterViewModel: ObservableObject {
                         ?? ""
                 }
             }
-            errorMessage = nil
+            if pendingResume == nil {
+                errorMessage = nil
+            }
             if inputDevices.isEmpty || outputDevices.isEmpty {
-                statusMessage = "An input device and a stereo output device are required."
+                statusMessage = "An input and a stereo output are required."
             }
         } catch {
-            errorMessage = error.localizedDescription
+            presentError(title: "Couldn’t read devices", message: error.localizedDescription)
         }
     }
 
@@ -272,32 +313,51 @@ final class RouterViewModel: ObservableObject {
         } else {
             currentUIDs = knownDeviceUIDs
         }
+        let watchedInputUID = isRunning ? selectedInputDeviceUID : pendingResume?.inputUID
+        let watchedOutputUIDs = isRunning ? runningOutputUIDs : (pendingResume?.outputUIDs ?? [])
         let change = AudioHardwareChangeEvaluator.evaluate(
             currentUIDs: currentUIDs,
             runningInputUID: isRunning ? selectedInputDeviceUID : nil,
             runningOutputUID: isRunning ? selectedOutputDeviceUID : nil,
             runningInputRate: isRunning ? runningInputRate : nil,
             runningOutputRate: isRunning ? runningOutputRate : nil,
-            currentInputRate: listed?.first { $0.uid == selectedInputDeviceUID }?.nominalSampleRate,
+            currentInputRate: listed?.first { $0.uid == watchedInputUID }?.nominalSampleRate,
             currentOutputRate: listed?.first { $0.uid == selectedOutputDeviceUID }?.nominalSampleRate,
             runningOutputUIDs: isRunning ? runningOutputUIDs : [],
             runningOutputRates: isRunning ? runningOutputRates : [:],
             currentOutputRates: Dictionary(
                 uniqueKeysWithValues: (listed ?? []).compactMap { device in
-                    runningOutputUIDs.contains(device.uid) ? (device.uid, device.nominalSampleRate) : nil
+                    watchedOutputUIDs.contains(device.uid) ? (device.uid, device.nominalSampleRate) : nil
                 }
-            )
+            ),
+            pendingResume: isRunning ? nil : pendingResume
         )
         let previousRoutable = knownDeviceUIDs
         switch change {
         case let .stopRoute(message):
-            stop()
+            let devicesStillPresent = currentUIDs.contains(selectedInputDeviceUID)
+                && (runningOutputUIDs.isEmpty || runningOutputUIDs.isSubset(of: currentUIDs))
+            if devicesStillPresent {
+                pendingResume = nil
+            } else {
+                rememberResumeTarget()
+            }
+            haltRouting(status: message)
             refreshCatalogs()
-            errorMessage = message
+            presentError(title: "Route stopped", message: message)
+        case .resumeRoute:
+            pendingResume = nil
+            refreshCatalogs()
+            errorMessage = nil
+            if canStart {
+                statusMessage = "Reconnecting…"
+                Task { await start() }
+            }
         case .refreshCatalog:
             refreshCatalogs()
             let newRoutable = Set(devices.map(\.uid)).subtracting(previousRoutable)
             if !isRunning,
+               pendingResume == nil,
                !newRoutable.isEmpty,
                !inputDevices.isEmpty,
                !outputDevices.isEmpty {
@@ -311,11 +371,34 @@ final class RouterViewModel: ObservableObject {
         if isRunning {
             stop()
         } else {
+            pendingResume = nil
             Task { await start() }
         }
     }
 
     func stop() {
+        pendingResume = nil
+        haltRouting(status: "Routing stopped.")
+    }
+
+    private func rememberResumeTarget() {
+        var outputUIDs = runningOutputUIDs
+        if outputUIDs.isEmpty {
+            outputUIDs = [selectedOutputDeviceUID]
+        }
+        var outputRates = runningOutputRates
+        if outputRates.isEmpty, let rate = runningOutputRate {
+            outputRates[selectedOutputDeviceUID] = rate
+        }
+        pendingResume = AudioHardwareResumeTarget(
+            inputUID: selectedInputDeviceUID,
+            outputUIDs: outputUIDs,
+            inputRate: runningInputRate ?? selectedInputDevice?.nominalSampleRate ?? 0,
+            outputRates: outputRates
+        )
+    }
+
+    private func haltRouting(status: String) {
         meterTask?.cancel()
         meterTask = nil
         hardwareObserver?.clearSampleRateWatches()
@@ -327,7 +410,7 @@ final class RouterViewModel: ObservableObject {
         isRunning = false
         inputLevel = 0
         outputLevel = 0
-        statusMessage = "Routing stopped."
+        statusMessage = status
     }
 
     func openPlugInUI(for slotID: UUID) {
@@ -459,7 +542,7 @@ final class RouterViewModel: ObservableObject {
             controller.showWindow(nil)
             controller.window?.makeKeyAndOrderFront(nil)
         } catch {
-            errorMessage = error.localizedDescription
+            presentError(title: "Couldn’t open plug-in", message: error.localizedDescription)
         }
     }
 
@@ -500,12 +583,26 @@ final class RouterViewModel: ObservableObject {
     }
 
     func panicMute() {
+        if isPanicMuted {
+            let restored = gainBeforePanic > 0 ? gainBeforePanic : 1
+            isPanicMuted = false
+            gain = restored
+            statusMessage = "Output restored."
+            return
+        }
+        gainBeforePanic = gain
+        isPanicMuted = true
         gain = 0
-        statusMessage = "Panic mute engaged."
+        statusMessage = "Muted."
     }
 
     func clearError() {
         errorMessage = nil
+    }
+
+    private func presentError(title: String, message: String) {
+        errorTitle = title
+        errorMessage = message
     }
 
     private var selectedInputSelection: InputChannelSelection? {
@@ -520,17 +617,20 @@ final class RouterViewModel: ObservableObject {
 
         isBusy = true
         errorMessage = nil
-        statusMessage = "Requesting audio input access…"
+        statusMessage = "Asking for microphone access…"
         defer { isBusy = false }
 
         guard await requestAudioPermission() else {
-            errorMessage = "Audio input permission is required. Enable AURouter in System Settings → Privacy & Security → Microphone."
-            statusMessage = "Permission denied."
+            presentError(
+                title: "Microphone access needed",
+                message: "Enable AURouter in System Settings → Privacy & Security → Microphone."
+            )
+            statusMessage = "Microphone access needed."
             return
         }
 
         do {
-            statusMessage = "Building the real-time graph…"
+            statusMessage = "Building the route…"
             let outputRoutes = currentOutputRoutes()
             guard let primary = outputRoutes.first,
                   let primaryDevice = outputDevices.first(where: { $0.uid == primary.deviceUID }) else { return }
@@ -574,8 +674,8 @@ final class RouterViewModel: ObservableObject {
         } catch {
             router.stop()
             isRunning = false
-            errorMessage = error.localizedDescription
-            statusMessage = "Unable to start routing."
+            presentError(title: "Couldn’t start route", message: error.localizedDescription)
+            statusMessage = "Couldn’t start the route."
         }
     }
 
@@ -727,6 +827,7 @@ final class RouterViewModel: ObservableObject {
         if isRunning {
             stop()
         }
+        isPanicMuted = false
         suppressPersistence = true
         applyRestoredSession(profile.session)
         suppressPersistence = false
