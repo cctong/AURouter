@@ -212,6 +212,215 @@ struct MonoProcessingGraphTests {
     }
 
     @Test @MainActor
+    func sampleRateConverterRendersSixteenKilohertzIntoAppleEffect() async throws {
+        let hardwareRate = 16_000.0
+        let processingRate = 48_000.0
+        let monoHardware = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: hardwareRate, channelCount: 1)
+        )
+        let monoProcessing = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: processingRate, channelCount: 1)
+        )
+        let stereoHardware = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: hardwareRate, channelCount: 2)
+        )
+        let source = ProcessingGraphTestSource.make(format: monoHardware)
+        let upConverter = try await instantiate(
+            SampleRateConverter.componentDescription(),
+            options: .loadInProcess
+        )
+        let effect = try await instantiate(
+            AudioComponentDescription(
+                componentType: kAudioUnitType_Effect,
+                componentSubType: kAudioUnitSubType_Delay,
+                componentManufacturer: kAudioUnitManufacturer_Apple,
+                componentFlags: 0,
+                componentFlagsMask: 0
+            )
+        )
+        let downConverter = try await instantiate(
+            SampleRateConverter.componentDescription(),
+            options: .loadInProcess
+        )
+        let upmixer = try await instantiateMatrixMixer()
+        let negotiated = try AudioUnitFormatNegotiator.prepare(
+            effect,
+            sourceChannelCount: 1,
+            sampleRate: processingRate,
+            displayName: "AUDelay"
+        )
+        #expect(negotiated == AudioUnitProcessingFormat(inputChannels: 1, outputChannels: 1))
+
+        let engine = AVAudioEngine()
+        engine.attach(source)
+        engine.attach(upConverter)
+        engine.attach(effect)
+        engine.attach(downConverter)
+        engine.attach(upmixer)
+        try SampleRateConverter.setStreamFormats(
+            upConverter,
+            input: monoHardware,
+            output: monoProcessing
+        )
+        try SampleRateConverter.setStreamFormats(
+            downConverter,
+            input: monoProcessing,
+            output: monoHardware
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: source,
+            to: upConverter,
+            format: monoHardware,
+            operation: "Test 16 kHz source connection"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: upConverter,
+            to: effect,
+            format: monoProcessing,
+            operation: "Test upsampled Audio Unit input"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: effect,
+            to: downConverter,
+            format: monoProcessing,
+            operation: "Test Audio Unit output into downsampler"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: downConverter,
+            to: upmixer,
+            format: monoHardware,
+            operation: "Test downsampled mono into upmixer"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: upmixer,
+            to: engine.mainMixerNode,
+            format: stereoHardware,
+            operation: "Test stereo output connection"
+        )
+        engine.mainMixerNode.outputVolume = 0
+        engine.prepare()
+        try MatrixMixerConfigurator.configure(
+            upmixer,
+            routes: try ChannelAdapter.routes(from: 1, to: 2)
+        )
+
+        try engine.start()
+        try await Task.sleep(for: .milliseconds(100))
+        engine.stop()
+    }
+
+    @Test @MainActor
+    func installedMonoWavesEffectRendersFromSixteenKilohertzSource() async throws {
+        let description = AudioComponentDescription(
+            componentType: kAudioUnitType_Effect,
+            componentSubType: fourCC("RQ6M"),
+            componentManufacturer: fourCC("ksWV"),
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+        var query = description
+        guard AudioComponentFindNext(nil, &query) != nil else { return }
+
+        let hardwareRate = 16_000.0
+        let effect = try await instantiate(description)
+        let prepared = try AudioUnitFormatNegotiator.prepareChain(
+            [(unit: effect, displayName: "REQ 6 (m)")],
+            sourceChannelCount: 1,
+            sampleRate: hardwareRate
+        )
+        #expect(prepared.sampleRate == 48_000)
+        #expect(prepared.formats == [AudioUnitProcessingFormat(inputChannels: 1, outputChannels: 1)])
+
+        let monoHardware = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: hardwareRate, channelCount: 1)
+        )
+        let monoProcessing = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: prepared.sampleRate, channelCount: 1)
+        )
+        let stereoHardware = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: hardwareRate, channelCount: 2)
+        )
+        let source = ProcessingGraphTestSource.make(format: monoHardware)
+        let upConverter = try await instantiate(
+            SampleRateConverter.componentDescription(),
+            options: .loadInProcess
+        )
+        let downConverter = try await instantiate(
+            SampleRateConverter.componentDescription(),
+            options: .loadInProcess
+        )
+        let upmixer = try await instantiateMatrixMixer()
+
+        let engine = AVAudioEngine()
+        engine.attach(source)
+        engine.attach(upConverter)
+        engine.attach(effect)
+        engine.attach(downConverter)
+        engine.attach(upmixer)
+        try SampleRateConverter.setStreamFormats(
+            upConverter,
+            input: monoHardware,
+            output: monoProcessing
+        )
+        try SampleRateConverter.setStreamFormats(
+            downConverter,
+            input: monoProcessing,
+            output: monoHardware
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: source,
+            to: upConverter,
+            format: monoHardware,
+            operation: "Test 16 kHz Waves source"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: upConverter,
+            to: effect,
+            format: monoProcessing,
+            operation: "Test upsampled Waves input"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: effect,
+            to: downConverter,
+            format: monoProcessing,
+            operation: "Test Waves output into downsampler"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: downConverter,
+            to: upmixer,
+            format: monoHardware,
+            operation: "Test downsampled Waves into upmixer"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: upmixer,
+            to: engine.mainMixerNode,
+            format: stereoHardware,
+            operation: "Test Waves stereo output"
+        )
+        engine.mainMixerNode.outputVolume = 0
+        engine.prepare()
+        try MatrixMixerConfigurator.configure(
+            upmixer,
+            routes: try ChannelAdapter.routes(from: 1, to: 2)
+        )
+
+        try engine.start()
+        try await Task.sleep(for: .milliseconds(100))
+        engine.stop()
+    }
+
+
+    @Test @MainActor
     func installedStereoWavesEffectRendersFromAdaptedMonoGraph() async throws {
         let description = AudioComponentDescription(
             componentType: kAudioUnitType_Effect,
@@ -450,6 +659,166 @@ struct MonoProcessingGraphTests {
     }
 
     @Test @MainActor
+    func engineStyleSampleRateConversionPublishesMixerDimensions() async throws {
+        let engine = AVAudioEngine()
+        let hardwareRate = engine.outputNode.inputFormat(forBus: 0).sampleRate
+        let processingRate = abs(hardwareRate - 48_000) <= 0.5 ? 44_100.0 : 48_000.0
+        let hardwareChannels = max(2, Int(engine.outputNode.inputFormat(forBus: 0).channelCount))
+        let monoHardware = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: hardwareRate, channelCount: 1)
+        )
+        let stereoHardware = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: hardwareRate, channelCount: 2)
+        )
+        let hardwareOutput = try #require(
+            AudioUnitFormatNegotiator.processingFormat(
+                sampleRate: hardwareRate,
+                channelCount: hardwareChannels
+            )
+        )
+        let monoProcessing = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: processingRate, channelCount: 1)
+        )
+        let stereoProcessing = try #require(
+            AudioUnitFormatNegotiator.processingFormat(sampleRate: processingRate, channelCount: 2)
+        )
+        let source = ProcessingGraphTestSource.make(format: stereoHardware)
+        let inputSelector = try await instantiateMatrixMixer()
+        let upConverter = try await instantiate(
+            SampleRateConverter.componentDescription(),
+            options: .loadInProcess
+        )
+        let effect = try await instantiate(
+            AudioComponentDescription(
+                componentType: kAudioUnitType_Effect,
+                componentSubType: kAudioUnitSubType_Delay,
+                componentManufacturer: kAudioUnitManufacturer_Apple,
+                componentFlags: 0,
+                componentFlagsMask: 0
+            )
+        )
+        let upmixer = try await instantiateMatrixMixer()
+        let downConverter = try await instantiate(
+            SampleRateConverter.componentDescription(),
+            options: .loadInProcess
+        )
+        let gain = AVAudioMixerNode()
+        gain.outputVolume = 0
+        let outputSelector = try await instantiateMatrixMixer()
+        _ = try AudioUnitFormatNegotiator.prepare(
+            effect,
+            sourceChannelCount: 1,
+            sampleRate: processingRate,
+            displayName: "AUDelay"
+        )
+
+        engine.attach(source)
+        engine.attach(inputSelector)
+        engine.attach(upConverter)
+        engine.attach(effect)
+        engine.attach(upmixer)
+        engine.attach(downConverter)
+        engine.attach(gain)
+        engine.attach(outputSelector)
+        try MatrixMixerConfigurator.setStreamFormats(
+            inputSelector,
+            input: stereoHardware,
+            output: monoHardware
+        )
+        try SampleRateConverter.setStreamFormats(
+            upConverter,
+            input: monoHardware,
+            output: monoProcessing
+        )
+        try MatrixMixerConfigurator.setStreamFormats(
+            upmixer,
+            input: monoProcessing,
+            output: stereoProcessing
+        )
+        try SampleRateConverter.setStreamFormats(
+            downConverter,
+            input: stereoProcessing,
+            output: stereoHardware
+        )
+        try MatrixMixerConfigurator.setStreamFormats(
+            outputSelector,
+            input: stereoHardware,
+            output: hardwareOutput
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: source,
+            to: inputSelector,
+            format: stereoHardware,
+            operation: "Test hardware capture into input selector"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: inputSelector,
+            to: upConverter,
+            format: monoHardware,
+            operation: "Test selected mono into upsampler"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: upConverter,
+            to: effect,
+            format: monoProcessing,
+            operation: "Test upsampled Audio Unit input"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: effect,
+            to: upmixer,
+            format: monoProcessing,
+            operation: "Test Audio Unit output into processing-rate adapter"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: upmixer,
+            to: downConverter,
+            format: stereoProcessing,
+            operation: "Test processing-rate adapter into downsampler"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: downConverter,
+            to: gain,
+            format: stereoHardware,
+            operation: "Test downsampled stereo into gain"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: gain,
+            to: outputSelector,
+            format: stereoHardware,
+            operation: "Test gain into output selector"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: outputSelector,
+            to: engine.mainMixerNode,
+            format: hardwareOutput,
+            operation: "Test output selector into mixer"
+        )
+        engine.mainMixerNode.outputVolume = 0
+        engine.prepare()
+        try MatrixMixerConfigurator.configure(inputSelector, routes: [(0, 0, 1)])
+        try MatrixMixerConfigurator.configure(
+            upmixer,
+            routes: try ChannelAdapter.routes(from: 1, to: 2)
+        )
+        try MatrixMixerConfigurator.configure(
+            outputSelector,
+            routes: [(0, 0, 1), (1, 1, 1)]
+        )
+
+        try engine.start()
+        try await Task.sleep(for: .milliseconds(50))
+        engine.stop()
+    }
+
+    @Test @MainActor
     func matrixWithHardwareLayoutFeedsPreparedAppleDelay() async throws {
         let engine = AVAudioEngine()
         let rate = engine.outputNode.inputFormat(forBus: 0).sampleRate
@@ -468,7 +837,7 @@ struct MonoProcessingGraphTests {
                 componentFlagsMask: 0
             )
         )
-        try AudioUnitFormatNegotiator.prepare(
+        _ = try AudioUnitFormatNegotiator.prepare(
             delay,
             sourceChannelCount: 2,
             sampleRate: rate,

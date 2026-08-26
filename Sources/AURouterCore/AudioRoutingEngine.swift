@@ -84,14 +84,16 @@ public final class AudioRoutingEngine {
             let outputNode = newEngine.outputNode
             try setCurrentDevice(device.id, on: outputNode)
 
-            let hardwareInputFormat = inputNode.outputFormat(forBus: 0)
+            let hardwareInputFormat = try HardwareInputStream.apply(
+                to: inputNode,
+                sampleRate: device.nominalSampleRate,
+                channelCount: device.inputChannelCount
+            )
             let hardwareOutputFormat = try HardwareOutputStream.apply(
                 to: outputNode,
-                channelCount: Int(device.outputChannelCount)
+                sampleRate: device.nominalSampleRate,
+                channelCount: device.outputChannelCount
             )
-            guard hardwareInputFormat.channelCount > 0 else {
-                throw AURouterError.unavailable("The selected device has no active input stream.")
-            }
 
             let sampleRate = hardwareOutputFormat.sampleRate
             guard let stereoFormat = AudioUnitFormatNegotiator.processingFormat(
@@ -104,12 +106,13 @@ public final class AudioRoutingEngine {
                 throw AURouterError.unavailable("Unable to create the stereo processing format.")
             }
 
-            let chain = try await prepareEffectChain(
+            let prepared = try await prepareEffectChain(
                 effects,
                 units: units,
                 sourceChannelCount: route.inputSelection.channelCount,
                 sampleRate: sampleRate
             )
+            let chain = prepared.items
             newEngine.attach(inputSelector)
             newEngine.attach(outputSelector)
             newEngine.attach(newGainNode)
@@ -150,7 +153,8 @@ public final class AudioRoutingEngine {
                 sourceFormat: sourceFormat,
                 effects: chain,
                 gainNode: newGainNode,
-                sampleRate: sampleRate
+                processingSampleRate: prepared.sampleRate,
+                hardwareSampleRate: sampleRate
             )
             try connectGain(
                 newGainNode,
@@ -174,27 +178,24 @@ public final class AudioRoutingEngine {
             inputMeter.store(0)
             outputMeter.store(0)
 
-            newEngine.prepare()
-            for extra in extras {
-                try extra.prepare()
+            try startMuted(
+                newEngine,
+                extras: extras,
+                gainNode: newGainNode,
+            ) {
+                try MatrixMixerConfigurator.configure(
+                    inputSelector,
+                    routes: ChannelAdapter.inputSelectionRoutes(route.inputSelection)
+                )
+                for adapter in adapters {
+                    try MatrixMixerConfigurator.configure(adapter.unit, routes: adapter.routes)
+                }
+                try MatrixMixerConfigurator.configure(
+                    outputSelector,
+                    routes: route.outputMatrixRoutes()
+                )
             }
-
-            try MatrixMixerConfigurator.configure(
-                inputSelector,
-                routes: ChannelAdapter.inputSelectionRoutes(route.inputSelection)
-            )
-            for adapter in adapters {
-                try MatrixMixerConfigurator.configure(adapter.unit, routes: adapter.routes)
-            }
-            try MatrixMixerConfigurator.configure(
-                outputSelector,
-                routes: route.outputMatrixRoutes()
-            )
-
-            try newEngine.start()
-            for extra in extras {
-                try extra.start()
-            }
+            newGainNode.outputVolume = clampGain(gain)
 
             engine = newEngine
             inputMatrix = inputSelector
@@ -233,7 +234,8 @@ public final class AudioRoutingEngine {
 
         let hardwareOutputFormat = try HardwareOutputStream.apply(
             to: outputNode,
-            channelCount: Int(outputDevice.outputChannelCount)
+            sampleRate: outputDevice.nominalSampleRate,
+            channelCount: outputDevice.outputChannelCount
         )
         let sampleRate = hardwareOutputFormat.sampleRate
         guard let stereoFormat = AudioUnitFormatNegotiator.processingFormat(
@@ -246,12 +248,13 @@ public final class AudioRoutingEngine {
             throw AURouterError.unavailable("Unable to create the stereo processing format.")
         }
 
-        let chain = try await prepareEffectChain(
+        let prepared = try await prepareEffectChain(
             effects,
             units: units,
             sourceChannelCount: route.inputSelection.channelCount,
             sampleRate: sampleRate
         )
+        let chain = prepared.items
 
         let targetLatencyFrames = CrossDeviceBridge.targetLatencyFrames(
             bufferHint: max(inputDevice.bufferFrameSize, outputDevice.bufferFrameSize)
@@ -297,7 +300,7 @@ public final class AudioRoutingEngine {
                 bufferHint: max(inputDevice.bufferFrameSize, outputDevice.bufferFrameSize)
             )
             let processingSource: AVAudioNode
-            let processingFormat: AVAudioFormat
+            let processingSourceFormat: AVAudioFormat
             if let inputSelector {
                 try AudioGraphConnector.connect(
                     newEngine,
@@ -307,18 +310,19 @@ public final class AudioRoutingEngine {
                     operation: "Connect cross-device source"
                 )
                 processingSource = inputSelector
-                processingFormat = sourceFormat
+                processingSourceFormat = sourceFormat
             } else {
                 processingSource = newSourceNode
-                processingFormat = stereoFormat
+                processingSourceFormat = stereoFormat
             }
             let adapters = try await connectProcessingChain(
                 engine: newEngine,
                 source: processingSource,
-                sourceFormat: processingFormat,
+                sourceFormat: processingSourceFormat,
                 effects: chain,
                 gainNode: newGainNode,
-                sampleRate: sampleRate
+                processingSampleRate: prepared.sampleRate,
+                hardwareSampleRate: sampleRate
             )
             try connectGain(
                 newGainNode,
@@ -343,26 +347,24 @@ public final class AudioRoutingEngine {
             inputMeter.store(0)
             outputMeter.store(0)
 
-            newEngine.prepare()
-            for extra in extras {
-                try extra.prepare()
+            try startMuted(
+                newEngine,
+                extras: extras,
+                gainNode: newGainNode,
+            ) {
+                if let inputSelector {
+                    try MatrixMixerConfigurator.configure(inputSelector, routes: [(0, 0, 1)])
+                }
+                for adapter in adapters {
+                    try MatrixMixerConfigurator.configure(adapter.unit, routes: adapter.routes)
+                }
+                try MatrixMixerConfigurator.configure(
+                    outputSelector,
+                    routes: route.outputMatrixRoutes()
+                )
             }
-            if let inputSelector {
-                try MatrixMixerConfigurator.configure(inputSelector, routes: [(0, 0, 1)])
-            }
-            for adapter in adapters {
-                try MatrixMixerConfigurator.configure(adapter.unit, routes: adapter.routes)
-            }
-            try MatrixMixerConfigurator.configure(
-                outputSelector,
-                routes: route.outputMatrixRoutes()
-            )
-
-            try newEngine.start()
+            newGainNode.outputVolume = clampGain(gain)
             try bridge.start()
-            for extra in extras {
-                try extra.start()
-            }
 
             engine = newEngine
             inputMatrix = inputSelector
@@ -440,6 +442,24 @@ public final class AudioRoutingEngine {
         max(0, min(gain, 2))
     }
 
+    private func startMuted(
+        _ engine: AVAudioEngine,
+        extras: [ExtraOutputGraph],
+        gainNode: AVAudioMixerNode,
+        configure: () throws -> Void
+    ) throws {
+        engine.prepare()
+        for extra in extras {
+            try extra.prepare()
+        }
+        gainNode.outputVolume = 0
+        try engine.start()
+        try configure()
+        for extra in extras {
+            try extra.start()
+        }
+    }
+
     private func setCurrentDevice(_ deviceID: AudioDeviceID, on outputNode: AVAudioOutputNode) throws {
         guard let ioUnit = outputNode.audioUnit else {
             throw AURouterError.unavailable("The audio engine did not create its HAL output unit.")
@@ -457,14 +477,20 @@ public final class AudioRoutingEngine {
     }
 
     private func instantiateMatrixMixer() async throws -> AVAudioUnit {
-        let description = AudioComponentDescription(
-            componentType: kAudioUnitType_Mixer,
-            componentSubType: kAudioUnitSubType_MatrixMixer,
-            componentManufacturer: kAudioUnitManufacturer_Apple,
-            componentFlags: 0,
-            componentFlagsMask: 0
+        try await instantiate(
+            AudioComponentDescription(
+                componentType: kAudioUnitType_Mixer,
+                componentSubType: kAudioUnitSubType_MatrixMixer,
+                componentManufacturer: kAudioUnitManufacturer_Apple,
+                componentFlags: 0,
+                componentFlagsMask: 0
+            ),
+            options: .loadInProcess
         )
-        return try await instantiate(description, options: .loadInProcess)
+    }
+
+    private func instantiateSampleRateConverter() async throws -> AVAudioUnit {
+        try await instantiate(SampleRateConverter.componentDescription(), options: .loadInProcess)
     }
 
     private func makeExtraOutputs(
@@ -532,14 +558,19 @@ public final class AudioRoutingEngine {
         let routes: [(Int, Int, Float)]
     }
 
+    private struct PreparedEffectChain {
+        let items: [(unit: AVAudioUnit, format: AudioUnitProcessingFormat)]
+        let sampleRate: Double
+    }
+
     private func prepareEffectChain(
         _ effects: [RoutedEffect],
         units: [AVAudioUnit],
         sourceChannelCount: Int,
         sampleRate: Double
-    ) async throws -> [(unit: AVAudioUnit, format: AudioUnitProcessingFormat)] {
-        var chain: [(unit: AVAudioUnit, format: AudioUnitProcessingFormat)] = []
-        var channels = sourceChannelCount
+    ) async throws -> PreparedEffectChain {
+        var instantiated: [(unit: AVAudioUnit, displayName: String)] = []
+        instantiated.reserveCapacity(effects.count)
         for index in effects.indices {
             let effect = effects[index]
             let unit: AVAudioUnit
@@ -548,18 +579,24 @@ public final class AudioRoutingEngine {
             } else {
                 unit = try await instantiateEffect(effect.descriptor)
             }
-            let format = try AudioUnitFormatNegotiator.prepare(
-                unit,
-                sourceChannelCount: channels,
-                sampleRate: sampleRate,
-                displayName: effect.descriptor.name
-            )
-            unit.auAudioUnit.shouldBypassEffect = effect.bypassed
-            chain.append((unit: unit, format: format))
-            channels = format.outputChannels
+            instantiated.append((unit: unit, displayName: effect.descriptor.name))
         }
-        return chain
+
+
+        let prepared = try AudioUnitFormatNegotiator.prepareChain(
+            instantiated,
+            sourceChannelCount: sourceChannelCount,
+            sampleRate: sampleRate
+        )
+        var items: [(unit: AVAudioUnit, format: AudioUnitProcessingFormat)] = []
+        items.reserveCapacity(instantiated.count)
+        for (index, item) in instantiated.enumerated() {
+            item.unit.auAudioUnit.shouldBypassEffect = effects[index].bypassed
+            items.append((unit: item.unit, format: prepared.formats[index]))
+        }
+        return PreparedEffectChain(items: items, sampleRate: prepared.sampleRate)
     }
+
 
     private func connectProcessingChain(
         engine: AVAudioEngine,
@@ -567,11 +604,17 @@ public final class AudioRoutingEngine {
         sourceFormat: AVAudioFormat,
         effects: [(unit: AVAudioUnit, format: AudioUnitProcessingFormat)],
         gainNode: AVAudioMixerNode,
-        sampleRate: Double
+        processingSampleRate: Double,
+        hardwareSampleRate: Double
     ) async throws -> [ConfiguredMatrix] {
         var adapters: [ConfiguredMatrix] = []
-        var precedingNode = source
-        var precedingFormat = sourceFormat
+        var (precedingNode, precedingFormat) = try await convertSampleRate(
+            engine: engine,
+            from: source,
+            format: sourceFormat,
+            toSampleRate: processingSampleRate,
+            operation: "Convert to Audio Unit sample rate"
+        )
 
         for effect in effects {
             let auInput = effect.unit.inputFormat(forBus: 0)
@@ -619,14 +662,14 @@ public final class AudioRoutingEngine {
             precedingFormat = effect.unit.outputFormat(forBus: 0)
         }
 
-        let stereo = try processingFormat(sampleRate, channels: 2)
+        let processingStereo = try processingFormat(processingSampleRate, channels: 2)
         if Int(precedingFormat.channelCount) != 2 {
             let adapter = try await instantiateMatrixMixer()
             engine.attach(adapter)
             try MatrixMixerConfigurator.setStreamFormats(
                 adapter,
                 input: precedingFormat,
-                output: stereo
+                output: processingStereo
             )
             try AudioGraphConnector.connect(
                 engine,
@@ -634,13 +677,6 @@ public final class AudioRoutingEngine {
                 to: adapter,
                 format: precedingFormat,
                 operation: "Connect post-effect channel adapter"
-            )
-            try AudioGraphConnector.connect(
-                engine,
-                from: adapter,
-                to: gainNode,
-                format: stereo,
-                operation: "Connect stereo gain stage"
             )
             adapters.append(
                 ConfiguredMatrix(
@@ -651,17 +687,50 @@ public final class AudioRoutingEngine {
                     )
                 )
             )
-        } else {
-            try AudioGraphConnector.connect(
-                engine,
-                from: precedingNode,
-                to: gainNode,
-                format: precedingFormat,
-                operation: "Connect stereo gain stage"
-            )
+            precedingNode = adapter
+            precedingFormat = processingStereo
         }
 
+        let gainSource = try await convertSampleRate(
+            engine: engine,
+            from: precedingNode,
+            format: precedingFormat,
+            toSampleRate: hardwareSampleRate,
+            operation: "Convert to hardware sample rate"
+        )
+        try AudioGraphConnector.connect(
+            engine,
+            from: gainSource.node,
+            to: gainNode,
+            format: gainSource.format,
+            operation: "Connect stereo gain stage"
+        )
+
         return adapters
+    }
+
+    private func convertSampleRate(
+        engine: AVAudioEngine,
+        from node: AVAudioNode,
+        format: AVAudioFormat,
+        toSampleRate: Double,
+        operation: String
+    ) async throws -> (node: AVAudioNode, format: AVAudioFormat) {
+        if abs(format.sampleRate - toSampleRate) <= 0.5 {
+            return (node, format)
+        }
+        let converted = try processingFormat(toSampleRate, channels: Int(format.channelCount))
+        let converter = try await instantiateSampleRateConverter()
+        engine.attach(converter)
+        try SampleRateConverter.setStreamFormats(converter, input: format, output: converted)
+        try AudioGraphConnector.connect(
+            engine,
+            from: node,
+            to: converter,
+            format: format,
+            operation: operation
+        )
+        return (converter, converted)
     }
 
     private func attach(_ node: AVAudioNode, to engine: AVAudioEngine) {

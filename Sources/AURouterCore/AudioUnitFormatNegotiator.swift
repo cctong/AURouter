@@ -24,6 +24,47 @@ enum AudioUnitFormatNegotiator {
         ]
     }
 
+    static func sampleRates(preferred: Double) -> [Double] {
+        var seen = Set<Int>()
+        var rates: [Double] = []
+        for rate in [preferred, 48_000, 44_100] {
+            let key = Int(rate.rounded())
+            if seen.insert(key).inserted {
+                rates.append(rate)
+            }
+        }
+        return rates
+    }
+
+    static func prepareChain(
+        _ units: [(unit: AVAudioUnit, displayName: String)],
+        sourceChannelCount: Int,
+        sampleRate: Double
+    ) throws -> (formats: [AudioUnitProcessingFormat], sampleRate: Double) {
+        var lastError: Error?
+        for rate in sampleRates(preferred: sampleRate) {
+            do {
+                var formats: [AudioUnitProcessingFormat] = []
+                var channels = sourceChannelCount
+                for item in units {
+                    let format = try prepare(
+                        item.unit,
+                        sourceChannelCount: channels,
+                        sampleRate: rate,
+                        displayName: item.displayName
+                    )
+                    formats.append(format)
+                    channels = format.outputChannels
+                }
+                return (formats, rate)
+            } catch {
+                lastError = error
+            }
+        }
+        throw lastError ?? AURouterError.audioUnit("No Audio Unit accepted a host layout.")
+    }
+
+
     static func prepare(
         _ unit: AVAudioUnit,
         sourceChannelCount: Int,
@@ -35,6 +76,9 @@ enum AudioUnitFormatNegotiator {
             throw AURouterError.audioUnit(
                 "\(displayName) does not expose a main audio input and output."
             )
+        }
+        if audioUnit.renderResourcesAllocated {
+            audioUnit.deallocateRenderResources()
         }
 
         for candidate in candidates(sourceChannelCount: sourceChannelCount) {
@@ -73,6 +117,9 @@ enum AudioUnitFormatNegotiator {
                 "\(displayName) does not expose a main audio input and output."
             )
         }
+        if audioUnit.renderResourcesAllocated {
+            audioUnit.deallocateRenderResources()
+        }
 
         do {
             try audioUnit.inputBusses[0].setFormat(format)
@@ -96,6 +143,38 @@ enum AudioUnitFormatNegotiator {
         )
     }
 }
+
+enum SampleRateConverter {
+    static func componentDescription() -> AudioComponentDescription {
+        AudioComponentDescription(
+            componentType: kAudioUnitType_FormatConverter,
+            componentSubType: kAudioUnitSubType_AUConverter,
+            componentManufacturer: kAudioUnitManufacturer_Apple,
+            componentFlags: 0,
+            componentFlagsMask: 0
+        )
+    }
+
+    static func setStreamFormats(
+        _ converter: AVAudioUnit,
+        input: AVAudioFormat,
+        output: AVAudioFormat
+    ) throws {
+        let audioUnit = converter.auAudioUnit
+        guard audioUnit.inputBusses.count > 0, audioUnit.outputBusses.count > 0 else {
+            throw AURouterError.audioUnit("The sample-rate converter does not expose audio busses.")
+        }
+        do {
+            try audioUnit.inputBusses[0].setFormat(input)
+            try audioUnit.outputBusses[0].setFormat(output)
+        } catch {
+            throw AURouterError.audioUnit(
+                "The sample-rate converter rejected \(Int(input.sampleRate))→\(Int(output.sampleRate)) Hz."
+            )
+        }
+    }
+}
+
 
 enum AudioGraphConnector {
     static func connect(

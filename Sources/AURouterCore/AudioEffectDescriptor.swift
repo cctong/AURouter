@@ -40,10 +40,12 @@ public struct AudioEffectDescriptor: Identifiable, Hashable, Codable, Sendable {
 public struct RoutedEffect: Hashable, Sendable {
     public var descriptor: AudioEffectDescriptor
     public var bypassed: Bool
+    public var state: Data?
 
-    public init(descriptor: AudioEffectDescriptor, bypassed: Bool = false) {
+    public init(descriptor: AudioEffectDescriptor, bypassed: Bool = false, state: Data? = nil) {
         self.descriptor = descriptor
         self.bypassed = bypassed
+        self.state = state
     }
 }
 

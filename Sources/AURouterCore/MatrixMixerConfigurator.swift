@@ -26,6 +26,7 @@ enum MatrixMixerConfigurator {
         _ matrix: AVAudioUnit,
         routes: [(Int, Int, Float)]
     ) throws {
+        ensureInitialized(matrix)
         let unit = matrix.audioUnit
 
         var dimensions = [UInt32](repeating: 0, count: 2)
@@ -63,5 +64,15 @@ enum MatrixMixerConfigurator {
             )
         }
         try AURouterError.check(levelStatus, operation: "Configure matrix mixer routes")
+    }
+
+    private static func ensureInitialized(_ matrix: AVAudioUnit) {
+        let audioUnit = matrix.auAudioUnit
+        if !audioUnit.renderResourcesAllocated {
+            try? audioUnit.allocateRenderResources()
+        }
+        if !audioUnit.renderResourcesAllocated {
+            _ = AudioUnitInitialize(matrix.audioUnit)
+        }
     }
 }

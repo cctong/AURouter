@@ -61,7 +61,8 @@ final class ExtraOutputGraph: @unchecked Sendable {
         try ExtraOutputGraph.setCurrentDevice(device.id, on: outputNode)
         let hardwareOutputFormat = try HardwareOutputStream.apply(
             to: outputNode,
-            channelCount: Int(device.outputChannelCount)
+            sampleRate: device.nominalSampleRate,
+            channelCount: device.outputChannelCount
         )
 
         engine.attach(source)
@@ -94,15 +95,17 @@ final class ExtraOutputGraph: @unchecked Sendable {
 
     func prepare() throws {
         engine.prepare()
+    }
+
+    func start() throws {
+        guard !started else { return }
+        try engine.start()
+        started = true
         try MatrixMixerConfigurator.configure(matrix, routes: pairs.flatMap { pair in
             [(0, pair.left, 1), (1, pair.right, 1)]
         })
     }
 
-    func start() throws {
-        try engine.start()
-        started = true
-    }
 
     func stop() {
         guard started else { return }

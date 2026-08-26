@@ -615,9 +615,6 @@ final class RouterViewModel: ObservableObject {
             hostedUnits[slotID] = unit
             hostingTasks[slotID] = nil
             unit.auAudioUnit.shouldBypassEffect = slot.bypassed
-            if let state = slot.state {
-                AudioUnitStateStore.apply(state, to: unit)
-            }
             return unit
         } catch {
             hostingTasks[slotID] = nil
@@ -705,9 +702,10 @@ final class RouterViewModel: ObservableObject {
             var units: [AVAudioUnit] = []
             for slot in chain {
                 guard let descriptor = effects.first(where: { $0.id == slot.effectID }) else { continue }
-                routed.append(RoutedEffect(descriptor: descriptor, bypassed: slot.bypassed))
+                routed.append(RoutedEffect(descriptor: descriptor, bypassed: slot.bypassed, state: slot.state))
                 units.append(try await hostedUnit(for: slot.id))
             }
+            let needsStateWarmup = chain.contains { $0.state != nil }
             try await router.start(
                 inputDevice: inputDevice,
                 outputDevice: primaryDevice,
@@ -715,8 +713,19 @@ final class RouterViewModel: ObservableObject {
                 route: route,
                 effects: routed,
                 units: units,
-                gain: Float(gain)
+                gain: needsStateWarmup ? 0 : Float(gain)
             )
+            if needsStateWarmup {
+                // Applying Waves fullState before the graph has rendered silences output.
+                try await Task.sleep(for: .milliseconds(400))
+                for slot in chain {
+                    if let unit = hostedUnits[slot.id], let state = slot.state {
+                        AudioUnitStateStore.apply(state, to: unit)
+                    }
+                }
+                router.setGain(Float(gain))
+            }
+
             isRunning = true
             runningInputRate = inputDevice.nominalSampleRate
             runningOutputRate = primaryDevice.nominalSampleRate

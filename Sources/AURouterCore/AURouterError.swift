@@ -28,6 +28,9 @@ public enum AURouterError: LocalizedError, Sendable {
         if status == kAudioUnitErr_FormatNotSupported {
             return "format not supported (\(status))"
         }
+        if status == kAudioUnitErr_Uninitialized {
+            return "uninitialized (\(status))"
+        }
         let value = UInt32(bitPattern: status)
         let bytes: [UInt8] = [
             UInt8((value >> 24) & 0xff),
