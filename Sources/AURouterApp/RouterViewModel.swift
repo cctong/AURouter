@@ -293,7 +293,8 @@ final class RouterViewModel: ObservableObject {
         }
     }
 
-    func refreshCatalogs() {
+    @discardableResult
+    func refreshCatalogs() -> Bool {
         suppressPersistence = true
         defer { suppressPersistence = false }
         do {
@@ -323,12 +324,16 @@ final class RouterViewModel: ObservableObject {
             if inputDevices.isEmpty || outputDevices.isEmpty {
                 statusMessage = "An input and a stereo output are required."
             }
+            return true
         } catch {
             presentError(title: "Couldn’t read devices", message: error.localizedDescription)
+            return false
         }
     }
 
     private func handleHardwareChange() {
+        guard !isBusy else { return }
+
         let listed = try? AudioDeviceCatalog.devices()
         let currentUIDs: Set<String>
         if let listed {
@@ -376,6 +381,18 @@ final class RouterViewModel: ObservableObject {
                 statusMessage = "Reconnecting…"
                 Task { await start() }
             }
+        case let .restartRoute(message):
+            rememberResumeTarget()
+            guard let target = pendingResume else { break }
+
+            haltRouting(status: message)
+
+            guard prepareSampleRateRestart(target) else { break }
+
+            statusMessage = "\(message) Restarting…"
+            Task {
+                await start(restarting: target)
+            }
         case .refreshCatalog:
             refreshCatalogs()
             let newRoutable = Set(devices.map(\.uid)).subtracting(previousRoutable)
@@ -391,6 +408,8 @@ final class RouterViewModel: ObservableObject {
     }
 
     func toggleRouting() {
+        guard !isBusy else { return }
+
         if isRunning {
             stop()
         } else {
@@ -419,6 +438,65 @@ final class RouterViewModel: ObservableObject {
             inputRate: runningInputRate ?? selectedInputDevice?.nominalSampleRate ?? 0,
             outputRates: outputRates
         )
+    }
+
+    private func prepareSampleRateRestart(
+        _ target: AudioHardwareResumeTarget
+    ) -> Bool {
+        pendingResume = target
+
+        guard refreshCatalogs() else {
+            let message = errorMessage ?? "The audio device catalog could not be refreshed."
+            pendingResume = nil
+            statusMessage = "Couldn’t restart the route."
+            presentError(title: "Couldn’t restart route", message: message)
+            return false
+        }
+
+        let refreshedUIDs = Set(devices.map(\.uid))
+        knownDeviceUIDs = refreshedUIDs
+
+        let disconnectMessage: String?
+        if !refreshedUIDs.contains(target.inputUID) {
+            disconnectMessage = "The input device was disconnected."
+        } else if !target.outputUIDs.isSubset(of: refreshedUIDs) {
+            disconnectMessage = target.outputUIDs.count > 1
+                ? "An output device was disconnected."
+                : "The output device was disconnected."
+        } else {
+            disconnectMessage = nil
+        }
+
+        if let disconnectMessage {
+            statusMessage = disconnectMessage
+            presentError(title: "Route stopped", message: disconnectMessage)
+            return false
+        }
+
+        let selectedOutputUIDs = Set(
+            [selectedOutputDeviceUID] + extraOutputSlots.map(\.deviceUID)
+        )
+        guard selectedInputDeviceUID == target.inputUID,
+              selectedOutputUIDs == target.outputUIDs else {
+            pendingResume = nil
+            statusMessage = "Couldn’t restart the route."
+            presentError(
+                title: "Couldn’t restart route",
+                message: "The route device selections changed before it could restart."
+            )
+            return false
+        }
+
+        guard canStart else {
+            let message = startBlockedReason ?? "The selected route is unavailable."
+            pendingResume = nil
+            statusMessage = "Couldn’t restart the route."
+            presentError(title: "Couldn’t restart route", message: message)
+            return false
+        }
+
+        errorMessage = nil
+        return true
     }
 
     private func haltRouting(status: String) {
@@ -665,19 +743,34 @@ final class RouterViewModel: ObservableObject {
     }
 
 
-    private func start() async {
+    private func start(
+        restarting target: AudioHardwareResumeTarget? = nil
+    ) async {
+        guard !isBusy, !isRunning else { return }
+
+        if let target {
+            guard prepareSampleRateRestart(target) else { return }
+            pendingResume = nil
+        }
+
         guard let inputDevice = selectedInputDevice,
               let inputSelection = selectedInputSelection else { return }
-
 
         isBusy = true
         errorMessage = nil
         statusMessage = "Asking for microphone access…"
-        defer { isBusy = false }
+        defer {
+            isBusy = false
+            if isRunning {
+                handleHardwareChange()
+            }
+        }
 
         guard await requestAudioPermission() else {
             presentError(
-                title: "Microphone access needed",
+                title: target == nil
+                    ? "Microphone access needed"
+                    : "Couldn’t restart route",
                 message: "Enable AURouter in System Settings → Privacy & Security → Microphone."
             )
             statusMessage = "Microphone access needed."
@@ -688,11 +781,21 @@ final class RouterViewModel: ObservableObject {
             statusMessage = "Building the route…"
             let outputRoutes = currentOutputRoutes()
             guard let primary = outputRoutes.first,
-                  let primaryDevice = outputDevices.first(where: { $0.uid == primary.deviceUID }) else { return }
+                  let primaryDevice = outputDevices.first(where: {
+                      $0.uid == primary.deviceUID
+                  }) else {
+                throw AURouterError.invalidRoute(
+                    startBlockedReason ?? "The primary output device is unavailable."
+                )
+            }
             let extraDevices = outputRoutes.dropFirst().compactMap { destination in
                 outputDevices.first { $0.uid == destination.deviceUID }
             }
-            guard extraDevices.count == outputRoutes.count - 1 else { return }
+            guard extraDevices.count == outputRoutes.count - 1 else {
+                throw AURouterError.invalidRoute(
+                    "An extra output device is unavailable."
+                )
+            }
             let route = RouteConfiguration(
                 inputDeviceUID: inputDevice.uid,
                 inputSelection: inputSelection,
@@ -741,8 +844,15 @@ final class RouterViewModel: ObservableObject {
         } catch {
             router.stop()
             isRunning = false
-            presentError(title: "Couldn’t start route", message: error.localizedDescription)
-            statusMessage = "Couldn’t start the route."
+            presentError(
+                title: target == nil
+                    ? "Couldn’t start route"
+                    : "Couldn’t restart route",
+                message: error.localizedDescription
+            )
+            statusMessage = target == nil
+                ? "Couldn’t start the route."
+                : "Couldn’t restart the route."
         }
     }
 

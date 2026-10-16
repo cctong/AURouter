@@ -80,7 +80,6 @@ The meter callbacks do not allocate, log, perform file I/O, or take locks. They 
 ## Roadmap
 
 - Saved routing profiles
-- Device-disconnect and live sample-rate-change recovery
 - Parallel routes and signal splits
 - Generic parameter UI for plug-ins without custom views
 - MIDI parameter control and scene switching

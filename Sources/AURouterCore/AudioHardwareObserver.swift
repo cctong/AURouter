@@ -4,6 +4,7 @@ import Foundation
 public enum AudioHardwareChange: Equatable, Sendable {
     case refreshCatalog
     case stopRoute(String)
+    case restartRoute(String)
     case resumeRoute
 }
 
@@ -52,7 +53,7 @@ public enum AudioHardwareChangeEvaluator {
         }
         if let runningInputRate, let currentInputRate,
            abs(runningInputRate - currentInputRate) > 0.5 {
-            return .stopRoute("The input device sample rate changed.")
+            return .restartRoute("The input device sample rate changed.")
         }
         var previousRates = runningOutputRates
         if previousRates.isEmpty, let uid = runningOutputUID, let rate = runningOutputRate {
@@ -67,7 +68,7 @@ public enum AudioHardwareChangeEvaluator {
                 let message = previousRates.count > 1
                     ? "An output device sample rate changed."
                     : "The output device sample rate changed."
-                return .stopRoute(message)
+                return .restartRoute(message)
             }
         }
         if let pendingResume, runningInputUID == nil {
